@@ -16,7 +16,7 @@ env:
 jobs:
   lint:
     name: Lint and typecheck
-    runs-on: blacksmith-6vcpu-macos-latest
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -39,7 +39,7 @@ jobs:
 
   rust:
     name: Rust checks
-    runs-on: blacksmith-6vcpu-macos-latest
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -63,7 +63,7 @@ jobs:
 
   build:
     name: Build
-    runs-on: blacksmith-6vcpu-macos-latest
+    runs-on: macos-latest
     needs: [lint, rust]
     steps:
       - uses: actions/checkout@v4

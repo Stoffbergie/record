@@ -18,9 +18,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - platform: blacksmith-6vcpu-macos-latest
+          - platform: macos-latest
             args: --target aarch64-apple-darwin
-          - platform: blacksmith-6vcpu-macos-latest
+          - platform: macos-latest
             args: --target x86_64-apple-darwin
     runs-on: ${{ matrix.platform }}
     steps:
