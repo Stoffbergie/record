@@ -5,6 +5,7 @@ use crate::types::{
 };
 use chrono::{DateTime, Duration, NaiveDate, NaiveTime, Utc};
 use rusqlite::Connection;
+use std::cmp::Reverse;
 
 fn escape_csv(s: &str) -> String {
     if s.contains(',') || s.contains('"') || s.contains('\n') {
@@ -508,7 +509,7 @@ impl SessionStore {
             });
         }
 
-        result.sort_by(|a, b| b.total_secs.cmp(&a.total_secs));
+        result.sort_by_key(|item| Reverse(item.total_secs));
 
         Ok(result)
     }
@@ -965,7 +966,7 @@ impl SessionStore {
             });
         }
 
-        projects.sort_by(|a, b| b.total_secs.cmp(&a.total_secs));
+        projects.sort_by_key(|project| Reverse(project.total_secs));
 
         Ok(AgentSummary {
             date: date.to_string(),
