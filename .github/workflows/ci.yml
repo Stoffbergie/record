@@ -37,6 +37,9 @@ jobs:
       - name: TypeScript typecheck
         run: pnpm typecheck
 
+      - name: React Doctor
+        run: pnpm doctor
+
   rust:
     name: Rust checks
     runs-on: macos-latest
