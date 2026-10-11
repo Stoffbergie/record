@@ -79,11 +79,42 @@ jobs:
           releaseBody: |
             Install via Homebrew:
             ```
-            brew install stoffberg/tap/record
+            brew install stoffbergie/tap/record
             ```
             Or download the DMG below.
           releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
 
+  update-homebrew:
+    name: Update Homebrew cask
+    needs: [release]
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Download released DMGs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --pattern '*.dmg' --dir artifacts
 
+      - name: Calculate checksums
+        id: checksums
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          arm64=$(shasum -a 256 "artifacts/Record_${version}_aarch64.dmg" | cut -d' ' -f1)
+          x64=$(shasum -a 256 "artifacts/Record_${version}_x64.dmg" | cut -d' ' -f1)
+          {
+            echo "arm64=$arm64"
+            echo "x64=$x64"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Update Homebrew tap
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          ARM64_SHA: ${{ steps.checksums.outputs.arm64 }}
+          X64_SHA: ${{ steps.checksums.outputs.x64 }}
+        run: |
+          jq -n --arg version "${GITHUB_REF_NAME#v}" --arg arm64 "$ARM64_SHA" --arg x64 "$X64_SHA" \
+            '{event_type: "update-record-cask", client_payload: {version: $version, arm64_sha: $arm64, x64_sha: $x64}}' \
+            | gh api --method POST repos/Stoffbergie/homebrew-tap/dispatches --input -

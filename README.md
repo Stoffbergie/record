@@ -31,7 +31,7 @@ Record runs as a background daemon, tracks which apps you use and for how long, 
 ## Install
 
 ```bash
-brew install stoffberg/tap/record
+brew install stoffbergie/tap/record
 ```
 
 Or download the latest `.dmg` from [Releases](https://github.com/Stoffberg/record/releases), open it, and drag Record to Applications.
@@ -106,7 +106,7 @@ Everything stays in `~/Library/Application Support/dev.stoff.record/`:
 - [x] Project detection from window titles (editor workspace, browser tab, terminal session)
 - [x] CSV export per space with date range selection
 - [x] Code signing and notarization for Gatekeeper
-- [x] Homebrew cask distribution (`brew install stoffberg/tap/record`)
+- [x] Homebrew cask distribution (`brew install stoffbergie/tap/record`)
 
 ## License
 
