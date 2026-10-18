@@ -842,17 +842,18 @@ impl SessionStore {
     }
 
     pub fn upsert_agent_sessions(&self, slices: &[AgentWorkSlice]) -> rusqlite::Result<()> {
+        let transaction = self.conn.unchecked_transaction()?;
         let mut seen_refs: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for slice in slices {
             if seen_refs.insert(&slice.session_ref) {
-                self.conn.execute(
+                transaction.execute(
                     "DELETE FROM agent_sessions WHERE session_ref = ?1",
                     rusqlite::params![slice.session_ref],
                 )?;
             }
         }
 
-        let mut stmt = self.conn.prepare(
+        let mut stmt = transaction.prepare(
             "INSERT INTO agent_sessions (agent, project, session_ref, started_at, ended_at, duration_secs)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )?;
@@ -867,7 +868,8 @@ impl SessionStore {
                 slice.duration_secs,
             ])?;
         }
-        Ok(())
+        drop(stmt);
+        transaction.commit()
     }
 
     pub fn get_daily_agent_summary(
