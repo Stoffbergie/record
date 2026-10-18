@@ -395,8 +395,6 @@ impl SessionStore {
         let day_end = DateTime::parse_from_rfc3339(&end)
             .unwrap()
             .with_timezone(&Utc);
-        let day_start_ts = day_start.timestamp();
-        let day_end_ts = day_end.timestamp();
 
         let mut active_stmt = self.conn.prepare(
             "SELECT s.project, s.started_at, s.ended_at, s.duration_secs
@@ -409,8 +407,8 @@ impl SessionStore {
 
         struct ActiveRow {
             project: String,
-            start_ts: i64,
-            end_ts: i64,
+            start: DateTime<Utc>,
+            end: DateTime<Utc>,
         }
 
         let active_rows: Vec<ActiveRow> = active_stmt
@@ -423,22 +421,14 @@ impl SessionStore {
                 let ended_at = DateTime::parse_from_rfc3339(&ended_str)
                     .unwrap()
                     .with_timezone(&Utc);
-                let clipped_start = started_at.max(day_start);
-                let clipped_end = ended_at.min(day_end);
-                let end_ts = clipped_end.timestamp();
-                let start_ts = if started_at < day_start || ended_at > day_end {
-                    end_ts - (clipped_end - clipped_start).num_seconds().max(0)
-                } else {
-                    clipped_start.timestamp()
-                };
                 Ok(ActiveRow {
                     project: row.get(0)?,
-                    start_ts,
-                    end_ts,
+                    start: started_at.max(day_start),
+                    end: ended_at.min(day_end),
                 })
             })?
             .filter_map(|r| r.ok())
-            .filter(|r| r.end_ts > r.start_ts)
+            .filter(|r| r.end > r.start)
             .collect();
 
         let mut agent_stmt = self.conn.prepare(
@@ -449,35 +439,33 @@ impl SessionStore {
 
         struct AgentRow {
             project: String,
-            start_ts: i64,
-            end_ts: i64,
+            start: DateTime<Utc>,
+            end: DateTime<Utc>,
         }
 
         let agent_rows: Vec<AgentRow> = agent_stmt
             .query_map(rusqlite::params![start, end], |row| {
                 let started_str: String = row.get(1)?;
                 let ended_str: String = row.get(2)?;
-                let s = DateTime::parse_from_rfc3339(&started_str)
+                let start = DateTime::parse_from_rfc3339(&started_str)
                     .unwrap()
                     .with_timezone(&Utc)
-                    .timestamp()
-                    .max(day_start_ts);
-                let e = DateTime::parse_from_rfc3339(&ended_str)
+                    .max(day_start);
+                let end = DateTime::parse_from_rfc3339(&ended_str)
                     .unwrap()
                     .with_timezone(&Utc)
-                    .timestamp()
-                    .min(day_end_ts);
+                    .min(day_end);
                 Ok(AgentRow {
                     project: row.get(0)?,
-                    start_ts: s,
-                    end_ts: e,
+                    start,
+                    end,
                 })
             })?
             .filter_map(|r| r.ok())
-            .filter(|r| r.end_ts > r.start_ts)
+            .filter(|r| r.end > r.start)
             .collect();
 
-        let mut active_map: std::collections::HashMap<String, Vec<(i64, i64)>> =
+        let mut active_map: std::collections::HashMap<String, Vec<_>> =
             std::collections::HashMap::new();
         let mut session_counts: std::collections::HashMap<String, i64> =
             std::collections::HashMap::new();
@@ -485,17 +473,17 @@ impl SessionStore {
             active_map
                 .entry(row.project.clone())
                 .or_default()
-                .push((row.start_ts, row.end_ts));
+                .push((row.start, row.end));
             *session_counts.entry(row.project.clone()).or_insert(0) += 1;
         }
 
-        let mut agent_map: std::collections::HashMap<String, Vec<(i64, i64)>> =
+        let mut agent_map: std::collections::HashMap<String, Vec<_>> =
             std::collections::HashMap::new();
         for row in &agent_rows {
             agent_map
                 .entry(row.project.clone())
                 .or_default()
-                .push((row.start_ts, row.end_ts));
+                .push((row.start, row.end));
         }
 
         let all_projects: std::collections::HashSet<String> =
@@ -508,12 +496,20 @@ impl SessionStore {
             let agent_intervals = agent_map.remove(project).unwrap_or_default();
 
             let merged_active = merge_intervals(active_intervals.clone());
-            let active_secs: i64 = merged_active.iter().map(|(s, e)| e - s).sum();
+            let active_secs = merged_active
+                .iter()
+                .map(|(start, end)| *end - *start)
+                .sum::<Duration>()
+                .num_seconds();
 
             let mut all_intervals = active_intervals.clone();
             all_intervals.extend(agent_intervals);
             let merged_all = merge_intervals(all_intervals);
-            let total_secs: i64 = merged_all.iter().map(|(s, e)| e - s).sum();
+            let total_secs = merged_all
+                .iter()
+                .map(|(start, end)| *end - *start)
+                .sum::<Duration>()
+                .num_seconds();
 
             let agent_secs = total_secs - active_secs;
 
@@ -983,35 +979,41 @@ impl SessionStore {
         let mut total_agent_secs: i64 = 0;
 
         for (project, proj_sessions) in &project_map {
-            let all_intervals: Vec<(i64, i64)> = proj_sessions
+            let all_intervals: Vec<(DateTime<Utc>, DateTime<Utc>)> = proj_sessions
                 .iter()
                 .map(|s| {
-                    let clamped_start = s.started_at.max(day_start).timestamp();
-                    let clamped_end = s.ended_at.min(day_end).timestamp();
+                    let clamped_start = s.started_at.max(day_start);
+                    let clamped_end = s.ended_at.min(day_end);
                     (clamped_start, clamped_end)
                 })
                 .filter(|(s, e)| e > s)
                 .collect();
 
             let merged = merge_intervals(all_intervals);
-            let deduped_secs: i64 = merged.iter().map(|(s, e)| e - s).sum();
+            let deduped_secs = merged
+                .iter()
+                .map(|(start, end)| *end - *start)
+                .sum::<Duration>()
+                .num_seconds();
 
-            let mut agent_map: std::collections::HashMap<&str, (i64, i64)> =
+            let mut agent_map: std::collections::HashMap<&str, (Duration, i64)> =
                 std::collections::HashMap::new();
             for session in proj_sessions {
-                let clamped_start = session.started_at.max(day_start).timestamp();
-                let clamped_end = session.ended_at.min(day_end).timestamp();
-                let secs = (clamped_end - clamped_start).max(0);
-                let entry = agent_map.entry(&session.agent).or_insert((0, 0));
-                entry.0 += secs;
+                let clamped_start = session.started_at.max(day_start);
+                let clamped_end = session.ended_at.min(day_end);
+                let duration = (clamped_end - clamped_start).max(Duration::zero());
+                let entry = agent_map
+                    .entry(&session.agent)
+                    .or_insert((Duration::zero(), 0));
+                entry.0 += duration;
                 entry.1 += 1;
             }
 
             let agents: Vec<AgentUsage> = agent_map
                 .into_iter()
-                .map(|(agent, (secs, count))| AgentUsage {
+                .map(|(agent, (duration, count))| AgentUsage {
                     agent: agent.to_string(),
-                    total_secs: secs,
+                    total_secs: duration.num_seconds(),
                     session_count: count,
                 })
                 .collect();

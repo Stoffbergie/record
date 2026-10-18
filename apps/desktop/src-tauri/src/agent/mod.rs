@@ -18,12 +18,12 @@ pub trait AgentProvider: Send {
     fn scan(&self, since_ms: i64) -> Vec<AgentWorkSlice>;
 }
 
-pub fn merge_intervals(mut intervals: Vec<(i64, i64)>) -> Vec<(i64, i64)> {
+pub fn merge_intervals<T: Copy + Ord>(mut intervals: Vec<(T, T)>) -> Vec<(T, T)> {
     if intervals.is_empty() {
         return intervals;
     }
     intervals.sort_by_key(|i| i.0);
-    let mut merged: Vec<(i64, i64)> = vec![intervals[0]];
+    let mut merged: Vec<(T, T)> = vec![intervals[0]];
     for interval in intervals.into_iter().skip(1) {
         let last = merged.last_mut().unwrap();
         if interval.0 <= last.1 {
