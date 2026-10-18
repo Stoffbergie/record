@@ -19,7 +19,7 @@ tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-log = "2"
 tauri-plugin-autostart = "2"
 tauri-plugin-sql = { version = "2", features = ["sqlite"] }
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.31", features = ["bundled", "functions"] }
 active-win-pos-rs = "0.9"
 user-idle = "0.6"
 chrono = { version = "0.4", features = ["serde"] }

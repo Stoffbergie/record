@@ -4,7 +4,7 @@ use crate::types::{
     Heartbeat, ProjectDetail, ProjectUsage, Space, SpaceUsage, SpaceWithProjects, TrackerConfig,
 };
 use chrono::{DateTime, Duration, NaiveDate, NaiveTime, Utc};
-use rusqlite::Connection;
+use rusqlite::{functions::FunctionFlags, Connection};
 use std::cmp::Reverse;
 
 fn escape_csv(s: &str) -> String {
@@ -33,6 +33,22 @@ pub struct SessionStore {
 
 impl SessionStore {
     pub fn new(conn: Connection, config: TrackerConfig) -> rusqlite::Result<Self> {
+        conn.create_scalar_function(
+            "clipped_duration",
+            4,
+            FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+            |context| {
+                let timestamp = |index| -> rusqlite::Result<DateTime<Utc>> {
+                    let value: String = context.get(index)?;
+                    DateTime::parse_from_rfc3339(&value)
+                        .map(|value| value.with_timezone(&Utc))
+                        .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))
+                };
+                let start = timestamp(0)?.max(timestamp(2)?);
+                let end = timestamp(1)?.min(timestamp(3)?);
+                Ok((end - start).num_seconds().max(0))
+            },
+        )?;
         let store = Self { conn, config };
         store.init_schema()?;
         Ok(store)
@@ -123,15 +139,18 @@ impl SessionStore {
         start: DateTime<Utc>,
         end: DateTime<Utc>,
     ) -> rusqlite::Result<Vec<AppSession>> {
+        if start >= end {
+            return Ok(Vec::new());
+        }
         let mut stmt = self.conn.prepare(
             "SELECT id, app_name, bundle_id, window_title, started_at, ended_at, duration_secs, is_idle, metadata, project, detail
              FROM app_sessions
-             WHERE started_at >= ?1 AND started_at <= ?2
+             WHERE started_at < ?2 AND ended_at > ?1
              ORDER BY started_at ASC",
         )?;
         let rows = stmt.query_map(
             rusqlite::params![start.to_rfc3339(), end.to_rfc3339()],
-            Self::row_to_session,
+            |row| Self::row_to_session(row).map(|session| Self::clamp_session(session, start, end)),
         )?;
         rows.collect()
     }
@@ -149,38 +168,42 @@ impl SessionStore {
             rusqlite::params![now],
         )?;
 
-        let (total_active, total_idle) = self.conn.query_row(
-            "SELECT
-                COALESCE(SUM(CASE WHEN s.is_idle = 0 THEN s.duration_secs ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN s.is_idle = 1 THEN s.duration_secs ELSE 0 END), 0)
-             FROM app_sessions s
-             LEFT JOIN app_exclusions e ON s.bundle_id = e.bundle_id
-             WHERE s.started_at >= ?1 AND s.started_at < ?2
-             AND e.bundle_id IS NULL",
-            rusqlite::params![start, end],
-            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-        )?;
-
         let mut stmt = self.conn.prepare(
-            "SELECT s.app_name, s.bundle_id, SUM(s.duration_secs), COUNT(*)
+            "SELECT s.app_name, s.bundle_id,
+                SUM(CASE WHEN s.started_at >= ?1 AND s.ended_at <= ?2 THEN s.duration_secs
+                         ELSE clipped_duration(s.started_at, s.ended_at, ?1, ?2) END) AS total_secs,
+                COUNT(*), s.is_idle
              FROM app_sessions s
              LEFT JOIN app_exclusions e ON s.bundle_id = e.bundle_id
-             WHERE s.started_at >= ?1 AND s.started_at < ?2 AND s.is_idle = 0
+             WHERE s.started_at < ?2 AND s.ended_at > ?1 AND s.is_idle IN (0, 1)
              AND e.bundle_id IS NULL
-             GROUP BY s.bundle_id
-             ORDER BY SUM(s.duration_secs) DESC",
+             GROUP BY s.bundle_id, s.is_idle
+             ORDER BY total_secs DESC",
         )?;
 
-        let apps: Vec<AppUsage> = stmt
-            .query_map(rusqlite::params![start, end], |row| {
-                Ok(AppUsage {
+        let rows = stmt.query_map(rusqlite::params![start, end], |row| {
+            Ok((
+                AppUsage {
                     app_name: row.get(0)?,
                     bundle_id: row.get(1)?,
                     total_secs: row.get(2)?,
                     session_count: row.get(3)?,
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
+                },
+                row.get::<_, bool>(4)?,
+            ))
+        })?;
+        let mut total_active = 0;
+        let mut total_idle = 0;
+        let mut apps = Vec::new();
+        for row in rows {
+            let (app, is_idle) = row?;
+            if is_idle {
+                total_idle += app.total_secs;
+            } else {
+                total_active += app.total_secs;
+                apps.push(app);
+            }
+        }
 
         Ok(DailySummary {
             date: date.to_string(),
@@ -210,19 +233,25 @@ impl SessionStore {
         let (month_start, _) = day_bounds_utc(&month_start_date, tz_offset_minutes);
 
         let week_avg: f64 = self.conn.query_row(
-            "SELECT COALESCE(CAST(SUM(duration_secs) AS REAL) / 7.0, 0.0)
+            "SELECT COALESCE(CAST(SUM(
+                CASE WHEN started_at >= ?2 AND ended_at <= ?3 THEN duration_secs
+                     ELSE clipped_duration(started_at, ended_at, ?2, ?3) END
+             ) AS REAL) / 7.0, 0.0)
              FROM app_sessions
              WHERE bundle_id = ?1 AND is_idle = 0
-             AND started_at >= ?2 AND started_at < ?3",
+             AND started_at < ?3 AND ended_at > ?2",
             rusqlite::params![bundle_id, week_start, today_start],
             |row| row.get(0),
         )?;
 
         let month_avg: f64 = self.conn.query_row(
-            "SELECT COALESCE(CAST(SUM(duration_secs) AS REAL) / 30.0, 0.0)
+            "SELECT COALESCE(CAST(SUM(
+                CASE WHEN started_at >= ?2 AND ended_at <= ?3 THEN duration_secs
+                     ELSE clipped_duration(started_at, ended_at, ?2, ?3) END
+             ) AS REAL) / 30.0, 0.0)
              FROM app_sessions
              WHERE bundle_id = ?1 AND is_idle = 0
-             AND started_at >= ?2 AND started_at < ?3",
+             AND started_at < ?3 AND ended_at > ?2",
             rusqlite::params![bundle_id, month_start, today_start],
             |row| row.get(0),
         )?;
@@ -237,17 +266,23 @@ impl SessionStore {
         tz_offset_minutes: i32,
     ) -> rusqlite::Result<Vec<AppSession>> {
         let (start, end) = day_bounds_utc(date, tz_offset_minutes);
+        let range_start = DateTime::parse_from_rfc3339(&start)
+            .unwrap()
+            .with_timezone(&Utc);
+        let range_end = DateTime::parse_from_rfc3339(&end)
+            .unwrap()
+            .with_timezone(&Utc);
 
         let mut stmt = self.conn.prepare(
             "SELECT id, app_name, bundle_id, window_title, started_at, ended_at, duration_secs, is_idle, metadata, project, detail
              FROM app_sessions
-             WHERE started_at >= ?1 AND started_at < ?2 AND bundle_id = ?3 AND is_idle = 0
+             WHERE started_at < ?2 AND ended_at > ?1 AND bundle_id = ?3 AND is_idle = 0
              ORDER BY started_at DESC",
         )?;
-        let rows = stmt.query_map(
-            rusqlite::params![start, end, bundle_id],
-            Self::row_to_session,
-        )?;
+        let rows = stmt.query_map(rusqlite::params![start, end, bundle_id], |row| {
+            Self::row_to_session(row)
+                .map(|session| Self::clamp_session(session, range_start, range_end))
+        })?;
         rows.collect()
     }
 
@@ -290,15 +325,18 @@ impl SessionStore {
         self.clean_expired_project_exclusions()?;
 
         let mut stmt = self.conn.prepare(
-            "SELECT s.project, SUM(s.duration_secs), COUNT(*)
+            "SELECT s.project,
+                SUM(CASE WHEN s.started_at >= ?1 AND s.ended_at <= ?2 THEN s.duration_secs
+                         ELSE clipped_duration(s.started_at, s.ended_at, ?1, ?2) END) AS total_secs,
+                COUNT(*)
              FROM app_sessions s
              LEFT JOIN project_exclusions pe ON s.project = pe.project
-             WHERE s.started_at >= ?1 AND s.started_at < ?2 AND s.bundle_id = ?3
+             WHERE s.started_at < ?2 AND s.ended_at > ?1 AND s.bundle_id = ?3
              AND s.is_idle = 0 AND s.project IS NOT NULL
              AND pe.project IS NULL
              GROUP BY s.project
-             HAVING SUM(s.duration_secs) >= 60
-             ORDER BY SUM(s.duration_secs) DESC",
+             HAVING total_secs >= 60
+             ORDER BY total_secs DESC",
         )?;
 
         let projects: Vec<(String, i64, i64)> = stmt
@@ -310,13 +348,15 @@ impl SessionStore {
         let mut result = Vec::with_capacity(projects.len());
         for (project, total_secs, session_count) in projects {
             let mut detail_stmt = self.conn.prepare(
-                "SELECT detail, SUM(duration_secs)
+                "SELECT detail,
+                    SUM(CASE WHEN started_at >= ?1 AND ended_at <= ?2 THEN duration_secs
+                             ELSE clipped_duration(started_at, ended_at, ?1, ?2) END) AS total_secs
                  FROM app_sessions
-                 WHERE started_at >= ?1 AND started_at < ?2 AND bundle_id = ?3
+                 WHERE started_at < ?2 AND ended_at > ?1 AND bundle_id = ?3
                  AND is_idle = 0 AND project = ?4 AND detail IS NOT NULL
                  GROUP BY detail
-                 HAVING SUM(duration_secs) >= 60
-                 ORDER BY SUM(duration_secs) DESC",
+                 HAVING total_secs >= 60
+                 ORDER BY total_secs DESC",
             )?;
 
             let details: Vec<ProjectDetail> = detail_stmt
@@ -349,20 +389,20 @@ impl SessionStore {
         let (start, end) = day_bounds_utc(date, tz_offset_minutes);
         self.clean_expired_project_exclusions()?;
 
-        let day_start_ts = DateTime::parse_from_rfc3339(&start)
+        let day_start = DateTime::parse_from_rfc3339(&start)
             .unwrap()
-            .with_timezone(&Utc)
-            .timestamp();
-        let day_end_ts = DateTime::parse_from_rfc3339(&end)
+            .with_timezone(&Utc);
+        let day_end = DateTime::parse_from_rfc3339(&end)
             .unwrap()
-            .with_timezone(&Utc)
-            .timestamp();
+            .with_timezone(&Utc);
+        let day_start_ts = day_start.timestamp();
+        let day_end_ts = day_end.timestamp();
 
         let mut active_stmt = self.conn.prepare(
             "SELECT s.project, s.started_at, s.ended_at, s.duration_secs
              FROM app_sessions s
              LEFT JOIN project_exclusions pe ON s.project = pe.project
-             WHERE s.started_at >= ?1 AND s.started_at < ?2
+             WHERE s.started_at < ?2 AND s.ended_at > ?1
              AND s.is_idle = 0 AND s.project IS NOT NULL
              AND pe.project IS NULL",
         )?;
@@ -377,20 +417,24 @@ impl SessionStore {
             .query_map(rusqlite::params![start, end], |row| {
                 let started_str: String = row.get(1)?;
                 let ended_str: String = row.get(2)?;
-                let s = DateTime::parse_from_rfc3339(&started_str)
+                let started_at = DateTime::parse_from_rfc3339(&started_str)
                     .unwrap()
-                    .with_timezone(&Utc)
-                    .timestamp()
-                    .max(day_start_ts);
-                let e = DateTime::parse_from_rfc3339(&ended_str)
+                    .with_timezone(&Utc);
+                let ended_at = DateTime::parse_from_rfc3339(&ended_str)
                     .unwrap()
-                    .with_timezone(&Utc)
-                    .timestamp()
-                    .min(day_end_ts);
+                    .with_timezone(&Utc);
+                let clipped_start = started_at.max(day_start);
+                let clipped_end = ended_at.min(day_end);
+                let end_ts = clipped_end.timestamp();
+                let start_ts = if started_at < day_start || ended_at > day_end {
+                    end_ts - (clipped_end - clipped_start).num_seconds().max(0)
+                } else {
+                    clipped_start.timestamp()
+                };
                 Ok(ActiveRow {
                     project: row.get(0)?,
-                    start_ts: s,
-                    end_ts: e,
+                    start_ts,
+                    end_ts,
                 })
             })?
             .filter_map(|r| r.ok())
@@ -480,13 +524,15 @@ impl SessionStore {
             let session_count = session_counts.get(project).copied().unwrap_or(0);
 
             let mut detail_stmt = self.conn.prepare(
-                "SELECT detail, SUM(duration_secs)
+                "SELECT detail,
+                    SUM(CASE WHEN started_at >= ?1 AND ended_at <= ?2 THEN duration_secs
+                             ELSE clipped_duration(started_at, ended_at, ?1, ?2) END) AS total_secs
                  FROM app_sessions
-                 WHERE started_at >= ?1 AND started_at < ?2
+                 WHERE started_at < ?2 AND ended_at > ?1
                  AND is_idle = 0 AND project = ?3 AND detail IS NOT NULL
                  GROUP BY detail
-                 HAVING SUM(duration_secs) >= 30
-                 ORDER BY SUM(duration_secs) DESC
+                 HAVING total_secs >= 30
+                 ORDER BY total_secs DESC
                  LIMIT 10",
             )?;
 
@@ -534,6 +580,19 @@ impl SessionStore {
             project: row.get(9)?,
             detail: row.get(10)?,
         })
+    }
+
+    fn clamp_session(
+        mut session: AppSession,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) -> AppSession {
+        if session.started_at < start || session.ended_at > end {
+            session.started_at = session.started_at.max(start);
+            session.ended_at = session.ended_at.min(end);
+            session.duration_secs = (session.ended_at - session.started_at).num_seconds().max(0);
+        }
+        session
     }
 
     pub fn create_space(
