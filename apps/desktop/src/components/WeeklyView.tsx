@@ -94,7 +94,13 @@ function aggregateWeek(summaries: DailySummary[], agentSummaries: AgentSummary[]
 }
 
 function emptySummary(date: Date): DailySummary {
-  return { date: localDateStr(date), total_active_secs: 0, total_idle_secs: 0, apps: [] }
+  return {
+    date: localDateStr(date),
+    total_active_secs: 0,
+    total_idle_secs: 0,
+    apps: [],
+    live_activity: null,
+  }
 }
 
 function emptyAgentSummary(date: Date): AgentSummary {

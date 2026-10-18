@@ -12,11 +12,17 @@ export interface AppSession {
   detail: string | null
 }
 
+export interface LiveActivity {
+  bundle_id: string
+  expires_at: string
+}
+
 export interface DailySummary {
   date: string
   total_active_secs: number
   total_idle_secs: number
   apps: AppUsage[]
+  live_activity: LiveActivity | null
 }
 
 export interface AppUsage {
