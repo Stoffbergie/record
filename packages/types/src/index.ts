@@ -1,3 +1,9 @@
+export interface DayRange {
+  date: string
+  start: string
+  end: string
+}
+
 export interface AppSession {
   id: number
   app_name: string
