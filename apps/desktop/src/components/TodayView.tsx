@@ -84,7 +84,7 @@ interface StoreState {
   ready: boolean
 }
 
-export default function TodayView() {
+export default function TodayView(props: { active: boolean }) {
   const [state, setState] = createStore<StoreState>({
     activeSecs: 0,
     idleSecs: 0,
@@ -162,6 +162,7 @@ export default function TodayView() {
     }, 1000)
 
     const keyHandler = (e: KeyboardEvent) => {
+      if (!props.active) return
       const tag = (e.target as HTMLElement)?.tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
       if (e.metaKey || e.ctrlKey || e.altKey) return
