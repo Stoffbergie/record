@@ -146,15 +146,21 @@ export default function WeeklyView() {
   const [week, setWeek] = createSignal<WeekData | null>(null)
   const [prevWeek, setPrevWeek] = createSignal<WeekData | null>(null)
   const [loading, setLoading] = createSignal(true)
+  let loadVersion = 0
+  let appliedLoadVersion = 0
 
   const isThisWeek = () => sameDay(monday(), getMonday(new Date()))
 
   async function load() {
+    const selectedMonday = monday()
+    const version = ++loadVersion
     setLoading(true)
     const [current, prior] = await Promise.all([
-      fetchWeek(monday()),
-      fetchWeek(addDays(monday(), -7)),
+      fetchWeek(selectedMonday),
+      fetchWeek(addDays(selectedMonday, -7)),
     ])
+    if (selectedMonday !== monday() || version < appliedLoadVersion) return
+    appliedLoadVersion = version
     setWeek(current)
     setPrevWeek(prior)
     setLoading(false)
