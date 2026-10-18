@@ -808,17 +808,55 @@ impl SessionStore {
     pub fn get_all_projects(&self) -> rusqlite::Result<Vec<(String, i64)>> {
         self.clean_expired_project_exclusions()?;
         let mut stmt = self.conn.prepare(
-            "SELECT s.project, SUM(s.duration_secs)
-             FROM app_sessions s
+            "SELECT s.project, s.started_at, s.ended_at
+             FROM (
+                 SELECT project, started_at, ended_at FROM app_sessions
+                 WHERE project IS NOT NULL AND is_idle = 0
+                 UNION ALL
+                 SELECT project, started_at, ended_at FROM agent_sessions
+             ) s
              LEFT JOIN project_exclusions pe ON s.project = pe.project
-             WHERE s.project IS NOT NULL AND s.is_idle = 0
-             AND pe.project IS NULL
-             GROUP BY s.project
-             HAVING SUM(s.duration_secs) >= 60
-             ORDER BY SUM(s.duration_secs) DESC",
+             WHERE pe.project IS NULL",
         )?;
-        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-        rows.collect()
+        let rows = stmt.query_map([], |row| {
+            let started_at: String = row.get(1)?;
+            let ended_at: String = row.get(2)?;
+            Ok((
+                row.get::<_, String>(0)?,
+                DateTime::parse_from_rfc3339(&started_at)
+                    .unwrap()
+                    .with_timezone(&Utc),
+                DateTime::parse_from_rfc3339(&ended_at)
+                    .unwrap()
+                    .with_timezone(&Utc),
+            ))
+        })?;
+        let mut intervals: std::collections::HashMap<String, Vec<_>> =
+            std::collections::HashMap::new();
+        for row in rows {
+            let (project, start, end) = row?;
+            if end > start {
+                intervals.entry(project).or_default().push((start, end));
+            }
+        }
+
+        let mut projects = Vec::new();
+        for (project, ranges) in intervals {
+            let total_secs = merge_intervals(ranges)
+                .iter()
+                .map(|(start, end)| *end - *start)
+                .sum::<Duration>()
+                .num_seconds();
+            if total_secs >= 60 {
+                projects.push((project, total_secs));
+            }
+        }
+        projects.sort_by(|(left_name, left_secs), (right_name, right_secs)| {
+            right_secs
+                .cmp(left_secs)
+                .then_with(|| left_name.cmp(right_name))
+        });
+        Ok(projects)
     }
 
     pub fn add_project_exclusion(
