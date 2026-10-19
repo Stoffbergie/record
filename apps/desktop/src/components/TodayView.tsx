@@ -101,16 +101,22 @@ export default function TodayView(props: { active: boolean }) {
   const [expandedProject, setExpandedProject] = createSignal<string | null>(null)
   const [ignoringProject, setIgnoringProject] = createSignal<string | null>(null)
   let lastFetchTime = 0
+  let refreshVersion = 0
+  let appliedRefreshVersion = 0
 
   const isToday = () => sameDay(selectedDate(), new Date())
 
   async function refresh() {
+    const date = selectedDate()
+    const version = ++refreshVersion
     try {
       const [data, spaces, agentData] = await Promise.all([
-        getDailySummary(selectedDate()),
-        getDailySpaces(selectedDate()),
-        getDailyAgentSummary(selectedDate()),
+        getDailySummary(date),
+        getDailySpaces(date),
+        getDailyAgentSummary(date),
       ])
+      if (date !== selectedDate() || version < appliedRefreshVersion) return
+      appliedRefreshVersion = version
       setState({
         activeSecs: data.total_active_secs,
         idleSecs: data.total_idle_secs,
