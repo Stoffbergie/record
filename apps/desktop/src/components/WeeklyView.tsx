@@ -147,20 +147,26 @@ function AppIcon(props: { bundleId: string }) {
   )
 }
 
-export default function WeeklyView() {
+export default function WeeklyView(props: { active: boolean }) {
   const [monday, setMonday] = createSignal(getMonday(new Date()))
   const [week, setWeek] = createSignal<WeekData | null>(null)
   const [prevWeek, setPrevWeek] = createSignal<WeekData | null>(null)
   const [loading, setLoading] = createSignal(true)
+  let loadVersion = 0
+  let appliedLoadVersion = 0
 
   const isThisWeek = () => sameDay(monday(), getMonday(new Date()))
 
   async function load() {
+    const selectedMonday = monday()
+    const version = ++loadVersion
     setLoading(true)
     const [current, prior] = await Promise.all([
-      fetchWeek(monday()),
-      fetchWeek(addDays(monday(), -7)),
+      fetchWeek(selectedMonday),
+      fetchWeek(addDays(selectedMonday, -7)),
     ])
+    if (selectedMonday !== monday() || version < appliedLoadVersion) return
+    appliedLoadVersion = version
     setWeek(current)
     setPrevWeek(prior)
     setLoading(false)
@@ -180,6 +186,7 @@ export default function WeeklyView() {
   onMount(() => {
     load()
     const keyHandler = (e: KeyboardEvent) => {
+      if (!props.active) return
       const tag = (e.target as HTMLElement)?.tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
       if (e.metaKey || e.ctrlKey || e.altKey) return

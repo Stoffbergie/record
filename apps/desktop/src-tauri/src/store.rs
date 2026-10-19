@@ -94,13 +94,13 @@ impl SessionStore {
     }
 
     fn try_merge(&self, heartbeat: &Heartbeat) -> rusqlite::Result<Option<Option<DateTime<Utc>>>> {
-        let result: rusqlite::Result<(i64, String, String, String, bool)> = self.conn.query_row(
-            "SELECT id, bundle_id, started_at, ended_at, is_idle FROM app_sessions ORDER BY id DESC LIMIT 1",
+        let result: rusqlite::Result<(i64, String, String, String, bool, Option<String>)> = self.conn.query_row(
+            "SELECT id, bundle_id, started_at, ended_at, is_idle, project FROM app_sessions ORDER BY id DESC LIMIT 1",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
         );
 
-        let (id, bundle_id, started_at_str, ended_at_str, is_idle) = match result {
+        let (id, bundle_id, started_at_str, ended_at_str, is_idle, project) = match result {
             Ok(row) => row,
             Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(Some(None)),
             Err(e) => return Err(e),
@@ -110,7 +110,10 @@ impl SessionStore {
             .unwrap()
             .with_timezone(&Utc);
 
-        if bundle_id != heartbeat.bundle_id || is_idle != heartbeat.is_idle {
+        if bundle_id != heartbeat.bundle_id
+            || is_idle != heartbeat.is_idle
+            || project != heartbeat.project
+        {
             return Ok(Some(Some(ended_at)));
         }
 
@@ -416,9 +419,11 @@ impl SessionStore {
             .collect();
 
         let mut agent_stmt = self.conn.prepare(
-            "SELECT project, started_at, ended_at
-             FROM agent_sessions
-             WHERE started_at < ?2 AND ended_at > ?1",
+            "SELECT s.project, s.started_at, s.ended_at
+             FROM agent_sessions s
+             LEFT JOIN project_exclusions pe ON s.project = pe.project
+             WHERE s.started_at < ?2 AND s.ended_at > ?1
+             AND pe.project IS NULL",
         )?;
 
         struct AgentRow {
@@ -773,17 +778,55 @@ impl SessionStore {
     pub fn get_all_projects(&self) -> rusqlite::Result<Vec<(String, i64)>> {
         self.clean_expired_project_exclusions()?;
         let mut stmt = self.conn.prepare(
-            "SELECT s.project, SUM(s.duration_secs)
-             FROM app_sessions s
+            "SELECT s.project, s.started_at, s.ended_at
+             FROM (
+                 SELECT project, started_at, ended_at FROM app_sessions
+                 WHERE project IS NOT NULL AND is_idle = 0
+                 UNION ALL
+                 SELECT project, started_at, ended_at FROM agent_sessions
+             ) s
              LEFT JOIN project_exclusions pe ON s.project = pe.project
-             WHERE s.project IS NOT NULL AND s.is_idle = 0
-             AND pe.project IS NULL
-             GROUP BY s.project
-             HAVING SUM(s.duration_secs) >= 60
-             ORDER BY SUM(s.duration_secs) DESC",
+             WHERE pe.project IS NULL",
         )?;
-        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-        rows.collect()
+        let rows = stmt.query_map([], |row| {
+            let started_at: String = row.get(1)?;
+            let ended_at: String = row.get(2)?;
+            Ok((
+                row.get::<_, String>(0)?,
+                DateTime::parse_from_rfc3339(&started_at)
+                    .unwrap()
+                    .with_timezone(&Utc),
+                DateTime::parse_from_rfc3339(&ended_at)
+                    .unwrap()
+                    .with_timezone(&Utc),
+            ))
+        })?;
+        let mut intervals: std::collections::HashMap<String, Vec<_>> =
+            std::collections::HashMap::new();
+        for row in rows {
+            let (project, start, end) = row?;
+            if end > start {
+                intervals.entry(project).or_default().push((start, end));
+            }
+        }
+
+        let mut projects = Vec::new();
+        for (project, ranges) in intervals {
+            let total_secs = merge_intervals(ranges)
+                .iter()
+                .map(|(start, end)| *end - *start)
+                .sum::<Duration>()
+                .num_seconds();
+            if total_secs >= 60 {
+                projects.push((project, total_secs));
+            }
+        }
+        projects.sort_by(|(left_name, left_secs), (right_name, right_secs)| {
+            right_secs
+                .cmp(left_secs)
+                .then_with(|| left_name.cmp(right_name))
+        });
+        Ok(projects)
     }
 
     pub fn add_project_exclusion(
@@ -862,17 +905,18 @@ impl SessionStore {
     }
 
     pub fn upsert_agent_sessions(&self, slices: &[AgentWorkSlice]) -> rusqlite::Result<()> {
+        let transaction = self.conn.unchecked_transaction()?;
         let mut seen_refs: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for slice in slices {
             if seen_refs.insert(&slice.session_ref) {
-                self.conn.execute(
+                transaction.execute(
                     "DELETE FROM agent_sessions WHERE session_ref = ?1",
                     rusqlite::params![slice.session_ref],
                 )?;
             }
         }
 
-        let mut stmt = self.conn.prepare(
+        let mut stmt = transaction.prepare(
             "INSERT INTO agent_sessions (agent, project, session_ref, started_at, ended_at, duration_secs)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )?;
@@ -887,18 +931,22 @@ impl SessionStore {
                 slice.duration_secs,
             ])?;
         }
-        Ok(())
+        drop(stmt);
+        transaction.commit()
     }
 
     pub fn get_daily_agent_summary(&self, day: &DayRange) -> rusqlite::Result<AgentSummary> {
         let start = day.start.to_rfc3339();
         let end = day.end.to_rfc3339();
+        self.clean_expired_project_exclusions()?;
 
         let mut stmt = self.conn.prepare(
-            "SELECT id, agent, project, session_ref, started_at, ended_at, duration_secs
-             FROM agent_sessions
-             WHERE started_at < ?2 AND ended_at > ?1
-             ORDER BY project, agent, started_at",
+            "SELECT s.id, s.agent, s.project, s.session_ref, s.started_at, s.ended_at, s.duration_secs
+             FROM agent_sessions s
+             LEFT JOIN project_exclusions pe ON s.project = pe.project
+             WHERE s.started_at < ?2 AND s.ended_at > ?1
+             AND pe.project IS NULL
+             ORDER BY s.project, s.agent, s.started_at",
         )?;
 
         let sessions: Vec<AgentSession> = stmt
