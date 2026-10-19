@@ -1,7 +1,8 @@
 use crate::agent::{merge_intervals, AgentWorkSlice};
 use crate::types::{
     AgentProjectUsage, AgentSession, AgentSummary, AgentUsage, AppSession, AppUsage, DailySummary,
-    Heartbeat, ProjectDetail, ProjectUsage, Space, SpaceUsage, SpaceWithProjects, TrackerConfig,
+    Heartbeat, LiveActivity, ProjectDetail, ProjectUsage, Space, SpaceUsage, SpaceWithProjects,
+    TrackerConfig,
 };
 use chrono::{DateTime, Duration, NaiveDate, NaiveTime, Utc};
 use rusqlite::{functions::FunctionFlags, Connection};
@@ -29,6 +30,7 @@ fn day_bounds_utc(date: &str, tz_offset_minutes: i32) -> (String, String) {
 pub struct SessionStore {
     conn: Connection,
     config: TrackerConfig,
+    live_activity: Option<LiveActivity>,
 }
 
 impl SessionStore {
@@ -49,13 +51,21 @@ impl SessionStore {
                 Ok((end - start).num_seconds().max(0))
             },
         )?;
-        let store = Self { conn, config };
+        let store = Self {
+            conn,
+            config,
+            live_activity: None,
+        };
         store.init_schema()?;
         Ok(store)
     }
 
     pub fn conn(&self) -> &Connection {
         &self.conn
+    }
+
+    pub fn set_live_activity(&mut self, activity: Option<LiveActivity>) {
+        self.live_activity = activity;
     }
 
     pub fn record_heartbeat(&self, heartbeat: Heartbeat) -> rusqlite::Result<()> {
@@ -208,11 +218,22 @@ impl SessionStore {
             }
         }
 
+        let now = Utc::now();
+        let today = (now + Duration::minutes(tz_offset_minutes as i64))
+            .format("%Y-%m-%d")
+            .to_string();
+        let live_activity = self.live_activity.as_ref().filter(|activity| {
+            date == today
+                && activity.expires_at > now
+                && apps.iter().any(|app| app.bundle_id == activity.bundle_id)
+        });
+
         Ok(DailySummary {
             date: date.to_string(),
             total_active_secs: total_active,
             total_idle_secs: total_idle,
             apps,
+            live_activity: live_activity.cloned(),
         })
     }
 

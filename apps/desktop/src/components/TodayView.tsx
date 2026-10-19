@@ -1,4 +1,4 @@
-import type { AgentProjectUsage, AppUsage, SpaceUsage } from '@record/types'
+import type { AgentProjectUsage, AppUsage, LiveActivity, SpaceUsage } from '@record/types'
 import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from 'solid-js'
 import { createStore, reconcile } from 'solid-js/store'
 import {
@@ -81,6 +81,7 @@ interface StoreState {
   agentSecs: number
   agentProjects: AgentProjectUsage[]
   apps: AppUsage[]
+  liveActivity: LiveActivity | null
   ready: boolean
 }
 
@@ -91,6 +92,7 @@ export default function TodayView(props: { active: boolean }) {
     agentSecs: 0,
     agentProjects: [],
     apps: [],
+    liveActivity: null,
     ready: false,
   })
   const [elapsed, setElapsed] = createSignal(0)
@@ -117,16 +119,17 @@ export default function TodayView(props: { active: boolean }) {
       ])
       if (date !== selectedDate() || version < appliedRefreshVersion) return
       appliedRefreshVersion = version
+      lastFetchTime = Date.now()
       setState({
         activeSecs: data.total_active_secs,
         idleSecs: data.total_idle_secs,
         agentSecs: agentData.total_agent_secs,
+        liveActivity: data.live_activity,
         ready: true,
       })
       setState('apps', reconcile(data.apps, { key: 'bundle_id' }))
       setState('agentProjects', reconcile(agentData.projects, { key: 'project' }))
       setSpacesStore('items', reconcile(spaces, { key: 'space' }))
-      lastFetchTime = Date.now()
       setElapsed(0)
     } catch {
       // backend not ready yet
@@ -206,7 +209,15 @@ export default function TodayView(props: { active: boolean }) {
     })
   })
 
-  const liveElapsed = () => (isToday() ? elapsed() : 0)
+  const liveElapsed = () => {
+    if (!isToday() || !state.liveActivity) return 0
+    const remaining = Math.floor((Date.parse(state.liveActivity.expires_at) - lastFetchTime) / 1000)
+    return Math.min(elapsed(), Math.max(0, remaining))
+  }
+  const appTime = (app: AppUsage) => {
+    if (app.bundle_id === state.liveActivity?.bundle_id) return app.total_secs + liveElapsed()
+    return app.total_secs
+  }
   const activeTime = () => state.activeSecs + liveElapsed()
   const idleTime = () => state.idleSecs
   const agentTime = () => state.agentSecs
@@ -217,7 +228,7 @@ export default function TodayView(props: { active: boolean }) {
   const topAppSecs = createMemo(() => {
     const apps = visibleApps()
     if (apps.length === 0) return 1
-    return Math.max(apps[0].total_secs + liveElapsed(), 1)
+    return Math.max(...apps.map(appTime), 1)
   })
 
   return (
@@ -309,9 +320,8 @@ export default function TodayView(props: { active: boolean }) {
             <Show when={tab() === 'apps'}>
               <div class="app-list">
                 <For each={visibleApps()}>
-                  {(app, i) => {
-                    const liveSecs = () =>
-                      i() === 0 ? app.total_secs + liveElapsed() : app.total_secs
+                  {(app) => {
+                    const liveSecs = () => appTime(app)
                     const pct = () => Math.max(2, (liveSecs() / topAppSecs()) * 100)
                     return (
                       <button type="button" class="app-row" onClick={() => setSelectedApp(app)}>

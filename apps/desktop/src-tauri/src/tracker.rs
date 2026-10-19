@@ -1,6 +1,6 @@
 use crate::project::ProjectDetector;
 use crate::store::SessionStore;
-use crate::types::{Heartbeat, TrackerConfig};
+use crate::types::{Heartbeat, LiveActivity, TrackerConfig};
 use chrono::Utc;
 use log::{error, info, warn};
 use std::collections::HashMap;
@@ -332,17 +332,28 @@ impl Tracker {
 
     fn record_heartbeat<P: SystemProbe>(&self, probe: &P) {
         if let Some((app_name, bundle_id, window_title)) = probe.foreground_app() {
+            let is_idle = probe.idle_seconds() >= self.config.idle_threshold_secs;
             let excluded = self
                 .store
                 .lock()
                 .ok()
-                .and_then(|s| s.is_excluded(&bundle_id).ok())
+                .and_then(|mut store| {
+                    let excluded = store.is_excluded(&bundle_id).ok()?;
+                    if excluded || is_idle {
+                        store.set_live_activity(None);
+                    }
+                    Some(excluded)
+                })
                 .unwrap_or(false);
 
             if !excluded {
-                let is_idle = probe.idle_seconds() >= self.config.idle_threshold_secs;
                 let now = Utc::now();
                 let ctx = self.detector.detect_at(&bundle_id, &window_title, now);
+                let activity = LiveActivity {
+                    bundle_id: bundle_id.clone(),
+                    expires_at: now
+                        + chrono::Duration::seconds(self.config.poll_interval_secs as i64 * 2),
+                };
                 let heartbeat = Heartbeat {
                     app_name,
                     bundle_id,
@@ -353,12 +364,19 @@ impl Tracker {
                     detail: ctx.and_then(|c| c.detail),
                 };
 
-                if let Ok(store) = self.store.lock() {
+                if let Ok(mut store) = self.store.lock() {
                     if let Err(e) = store.record_heartbeat(heartbeat) {
+                        store.set_live_activity(None);
                         error!("Failed to record heartbeat: {}", e);
+                    } else if !is_idle {
+                        store.set_live_activity(Some(activity));
+                    } else {
+                        store.set_live_activity(None);
                     }
                 }
             }
+        } else if let Ok(mut store) = self.store.lock() {
+            store.set_live_activity(None);
         }
     }
 

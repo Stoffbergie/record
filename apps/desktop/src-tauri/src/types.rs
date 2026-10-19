@@ -36,11 +36,18 @@ pub struct AppUsage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LiveActivity {
+    pub bundle_id: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DailySummary {
     pub date: String,
     pub total_active_secs: i64,
     pub total_idle_secs: i64,
     pub apps: Vec<AppUsage>,
+    pub live_activity: Option<LiveActivity>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
