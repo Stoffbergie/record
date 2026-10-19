@@ -401,9 +401,11 @@ impl SessionStore {
             .collect();
 
         let mut agent_stmt = self.conn.prepare(
-            "SELECT project, started_at, ended_at
-             FROM agent_sessions
-             WHERE started_at < ?2 AND ended_at > ?1",
+            "SELECT s.project, s.started_at, s.ended_at
+             FROM agent_sessions s
+             LEFT JOIN project_exclusions pe ON s.project = pe.project
+             WHERE s.started_at < ?2 AND s.ended_at > ?1
+             AND pe.project IS NULL",
         )?;
 
         struct AgentRow {
@@ -881,12 +883,15 @@ impl SessionStore {
         tz_offset_minutes: i32,
     ) -> rusqlite::Result<AgentSummary> {
         let (start, end) = day_bounds_utc(date, tz_offset_minutes);
+        self.clean_expired_project_exclusions()?;
 
         let mut stmt = self.conn.prepare(
-            "SELECT id, agent, project, session_ref, started_at, ended_at, duration_secs
-             FROM agent_sessions
-             WHERE started_at < ?2 AND ended_at > ?1
-             ORDER BY project, agent, started_at",
+            "SELECT s.id, s.agent, s.project, s.session_ref, s.started_at, s.ended_at, s.duration_secs
+             FROM agent_sessions s
+             LEFT JOIN project_exclusions pe ON s.project = pe.project
+             WHERE s.started_at < ?2 AND s.ended_at > ?1
+             AND pe.project IS NULL
+             ORDER BY s.project, s.agent, s.started_at",
         )?;
 
         let sessions: Vec<AgentSession> = stmt
