@@ -1,6 +1,6 @@
 [package]
 name = "record"
-version = "0.3.0"
+version = "0.3.1"
 description = "Track your apps and projects locally on macOS."
 authors = ["Dirk Beukes"]
 license = "MIT"
