@@ -172,11 +172,11 @@ function App() {
         </nav>
         <main class="content">
           <div class="view-panel" style={{ display: view() === 'today' ? 'block' : 'none' }}>
-            <TodayView />
+            <TodayView active={view() === 'today'} />
           </div>
           <Show when={visited().has('weekly')}>
             <div class="view-panel" style={{ display: view() === 'weekly' ? 'block' : 'none' }}>
-              <WeeklyView />
+              <WeeklyView active={view() === 'weekly'} />
             </div>
           </Show>
           <Show when={visited().has('spaces')}>
