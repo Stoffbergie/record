@@ -79,13 +79,13 @@ impl SessionStore {
     }
 
     fn try_merge(&self, heartbeat: &Heartbeat) -> rusqlite::Result<Option<Option<DateTime<Utc>>>> {
-        let result: rusqlite::Result<(i64, String, String, String, bool)> = self.conn.query_row(
-            "SELECT id, bundle_id, started_at, ended_at, is_idle FROM app_sessions ORDER BY id DESC LIMIT 1",
+        let result: rusqlite::Result<(i64, String, String, String, bool, Option<String>)> = self.conn.query_row(
+            "SELECT id, bundle_id, started_at, ended_at, is_idle, project FROM app_sessions ORDER BY id DESC LIMIT 1",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
         );
 
-        let (id, bundle_id, started_at_str, ended_at_str, is_idle) = match result {
+        let (id, bundle_id, started_at_str, ended_at_str, is_idle, project) = match result {
             Ok(row) => row,
             Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(Some(None)),
             Err(e) => return Err(e),
@@ -95,7 +95,10 @@ impl SessionStore {
             .unwrap()
             .with_timezone(&Utc);
 
-        if bundle_id != heartbeat.bundle_id || is_idle != heartbeat.is_idle {
+        if bundle_id != heartbeat.bundle_id
+            || is_idle != heartbeat.is_idle
+            || project != heartbeat.project
+        {
             return Ok(Some(Some(ended_at)));
         }
 
