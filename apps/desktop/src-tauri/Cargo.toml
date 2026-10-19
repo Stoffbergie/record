@@ -1,7 +1,7 @@
 [package]
 name = "record"
 version = "0.3.0"
-description = "A privacy-first activity tracker for macOS"
+description = "Track your apps and projects locally on macOS."
 authors = ["Dirk Beukes"]
 license = "MIT"
 edition = "2021"

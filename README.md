@@ -5,8 +5,7 @@
 <h1 align="center">Record</h1>
 
 <p align="center">
-  <strong>Know where your time goes.</strong><br />
-  Privacy-first activity tracker for macOS.
+  <strong>Track your apps and projects locally on macOS.</strong>
 </p>
 
 <p align="center">

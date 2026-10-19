@@ -1,6 +1,6 @@
 # Record: Agent Instructions
 
-Privacy-first macOS activity tracker. Tauri v2 desktop app with a Rust backend and Solid.js frontend.
+Track your apps and projects locally on macOS. Tauri v2 desktop app with a Rust backend and Solid.js frontend.
 
 ## Architecture
 
