@@ -16,6 +16,11 @@ fn escape_csv(s: &str) -> String {
     }
 }
 
+enum ProjectDetails {
+    Include,
+    Skip,
+}
+
 pub struct SessionStore {
     conn: Connection,
     config: TrackerConfig,
@@ -376,6 +381,14 @@ impl SessionStore {
     }
 
     pub fn get_daily_projects(&self, day: &DayRange) -> rusqlite::Result<Vec<ProjectUsage>> {
+        self.read_daily_projects(day, ProjectDetails::Include)
+    }
+
+    fn read_daily_projects(
+        &self,
+        day: &DayRange,
+        detail_level: ProjectDetails,
+    ) -> rusqlite::Result<Vec<ProjectUsage>> {
         let start = day.start.to_rfc3339();
         let end = day.end.to_rfc3339();
         self.clean_expired_project_exclusions()?;
@@ -508,27 +521,32 @@ impl SessionStore {
 
             let session_count = session_counts.get(project).copied().unwrap_or(0);
 
-            let mut detail_stmt = self.conn.prepare(
-                "SELECT detail,
-                    SUM(CASE WHEN started_at >= ?1 AND ended_at <= ?2 THEN duration_secs
-                             ELSE clipped_duration(started_at, ended_at, ?1, ?2) END) AS total_secs
-                 FROM app_sessions
-                 WHERE started_at < ?2 AND ended_at > ?1
-                 AND is_idle = 0 AND project = ?3 AND detail IS NOT NULL
-                 GROUP BY detail
-                 HAVING total_secs >= 30
-                 ORDER BY total_secs DESC
-                 LIMIT 10",
-            )?;
+            let details = if matches!(detail_level, ProjectDetails::Include) {
+                let mut detail_stmt = self.conn.prepare(
+                    "SELECT detail,
+                        SUM(CASE WHEN started_at >= ?1 AND ended_at <= ?2 THEN duration_secs
+                                 ELSE clipped_duration(started_at, ended_at, ?1, ?2) END) AS total_secs
+                     FROM app_sessions
+                     WHERE started_at < ?2 AND ended_at > ?1
+                     AND is_idle = 0 AND project = ?3 AND detail IS NOT NULL
+                     GROUP BY detail
+                     HAVING total_secs >= 30
+                     ORDER BY total_secs DESC
+                     LIMIT 10",
+                )?;
 
-            let details: Vec<ProjectDetail> = detail_stmt
-                .query_map(rusqlite::params![start, end, project], |row| {
-                    Ok(ProjectDetail {
-                        label: row.get(0)?,
-                        total_secs: row.get(1)?,
-                    })
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
+                let details = detail_stmt
+                    .query_map(rusqlite::params![start, end, project], |row| {
+                        Ok(ProjectDetail {
+                            label: row.get(0)?,
+                            total_secs: row.get(1)?,
+                        })
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                details
+            } else {
+                Vec::new()
+            };
 
             result.push(ProjectUsage {
                 project: project.clone(),
@@ -747,7 +765,7 @@ impl SessionStore {
             String::from("date,project,active_secs,agent_secs,total_secs,session_count\n");
 
         for day in days {
-            let projects = self.get_daily_projects(day)?;
+            let projects = self.read_daily_projects(day, ProjectDetails::Skip)?;
 
             let project_map: std::collections::HashMap<&str, &ProjectUsage> =
                 projects.iter().map(|p| (p.project.as_str(), p)).collect();
