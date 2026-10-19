@@ -10,23 +10,25 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/Stoffberg/record/actions/workflows/ci.yml"><img src="https://github.com/Stoffberg/record/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI" /></a>
+  <a href="https://github.com/Stoffbergie/record/releases"><img src="https://img.shields.io/github/v/release/Stoffbergie/record" alt="Latest release" /></a>
   <img src="https://img.shields.io/badge/platform-macOS-000?logo=apple" alt="macOS" />
   <img src="https://img.shields.io/badge/Rust-backend-B7410E?logo=rust" alt="Rust" />
   <img src="https://img.shields.io/badge/license-MIT-green" alt="License" />
 </p>
 
-Record runs as a background daemon, tracks which apps you use and for how long, stores everything locally in SQLite, and shows daily and monthly breakdowns through a native desktop app. No cloud, no accounts. Your data never leaves your machine.
+Record tracks which apps and projects you work on, stores activity locally in SQLite, and shows daily and weekly breakdowns in a macOS desktop app. No cloud or account required.
 
 ## Features
 
 - Foreground app tracking with idle detection
-- Live-ticking counters (1s frontend interpolation, 5s backend poll)
-- Per-app breakdown with native icons, session counts, and progress bars
-- Monthly view with daily activity bars
-- System tray with show/hide and quit
-- Window close hides to tray (keeps tracking in the background)
-- Dark and light mode (follows system preference)
+- Daily app breakdowns with native icons, session details, and live counters
+- Weekly summaries with daily activity bars and previous-week comparisons
+- Project detection for supported editors, terminals, and browsers
+- Spaces to group projects, with CSV export for a chosen date range
+- OpenCode agent activity alongside your own focus time
+- App and project exclusions, including temporary exclusions
+- Launch at login and background tracking from the menu bar
+- Light, dark, and system themes
 
 ## Install
 
@@ -34,9 +36,20 @@ Record runs as a background daemon, tracks which apps you use and for how long, 
 brew install stoffbergie/tap/record
 ```
 
-Or download the latest `.dmg` from [Releases](https://github.com/Stoffberg/record/releases), open it, and drag Record to Applications.
+Or download the latest `.dmg` from [Releases](https://github.com/Stoffbergie/record/releases), open it, and drag Record to Applications. Choose `aarch64` for Apple Silicon or `x64` for Intel.
 
-On first launch, macOS will prompt for Accessibility permission. Grant it so Record can read window titles.
+On first launch, follow the onboarding screen to grant Accessibility permission so Record can read window titles. Enable **Launch at login** in Settings to start tracking when you sign in.
+
+Closing the window keeps tracking in the background. Use **Quit** in the menu bar icon's menu to stop Record.
+
+## Using Record
+
+- **Today:** browse daily app activity and project totals, or open an app for its sessions.
+- **Weekly:** compare a week's activity with the previous week.
+- **Spaces:** group projects and export their time to CSV.
+- **Settings:** choose a theme, manage launch at login, and re-detect projects in recorded sessions.
+
+Use **Cmd+1–4** to switch views and the **left/right arrow keys** to browse dates in Today or Weekly. Press **t** in Today to return to the current day.
 
 ## Develop
 
@@ -45,13 +58,13 @@ pnpm install
 pnpm dev
 ```
 
-Requires macOS, [Rust](https://rustup.rs/) 1.77+, [Node.js](https://nodejs.org/) 22+, [pnpm](https://pnpm.io/) 10+, and Xcode Command Line Tools.
+Requires macOS, [Rust](https://rustup.rs/) 1.77.2 or newer, [Node.js](https://nodejs.org/) 22+, [pnpm](https://pnpm.io/) 10+, and Xcode Command Line Tools.
 
 | Command | What it does |
 |---------|-------------|
 | `pnpm dev` | Start in development mode (hot reload) |
 | `pnpm build` | Production build |
-| `pnpm check` | Run everything: lint, typecheck, fmt, clippy, test |
+| `pnpm check` | Run lint, typecheck, doctor, Rust formatting, clippy, and tests |
 | `pnpm lint` | Biome lint + format check |
 | `pnpm test` | Rust tests |
 | `pnpm clippy` | Rust linting |
@@ -77,36 +90,24 @@ Shared types live in `packages/` so they can be reused later by a CLI, web dashb
 
 ## How it works
 
-The tracker polls the active window every 5 seconds using `NSWorkspace.frontmostApplication()` and checks idle time via IOKit. Each poll produces a heartbeat. Consecutive heartbeats for the same app get merged into sessions (configurable gap threshold). Sessions are stored in SQLite with RFC3339 timestamps.
+The tracker checks the active window every 5 seconds and when the foreground app changes. Idle detection separates active and idle time. Consecutive heartbeats for the same app get merged into sessions, stored in SQLite with RFC3339 timestamps.
 
-The frontend fetches summaries every 5 seconds and interpolates counters at 1 second intervals so everything feels live without hammering the database.
+The Today view fetches summaries every 5 seconds and interpolates counters at 1 second intervals.
+
+Project adapters use window titles and supported apps' local state. OpenCode agent activity is read from its local database. Project totals combine focus and agent activity without counting overlapping time twice.
 
 Bundle IDs are resolved by walking the process path up to find the `.app` bundle and reading `CFBundleIdentifier` from `Info.plist`. App icons are extracted from `.icns` files via `sips`, cached on disk and in memory.
 
 ## Data
 
-Everything stays in `~/Library/Application Support/dev.stoff.record/`:
+Recorded activity stays in `~/Library/Application Support/dev.stoff.record/`:
 
 | File | Contents |
 |------|----------|
-| `record.db` | SQLite database with all activity sessions |
+| `record.db` | Activity and agent sessions, projects, spaces, and exclusions |
 | `icon_cache/` | PNG app icons (extracted from system `.icns` files) |
 
-## Roadmap
-
-- [x] Launch at login (autostart on macOS login)
-- [x] Onboarding screen with Accessibility permission prompt
-- [x] Click a day in monthly view to see that day's breakdown
-- [x] App exclusion list (ignore specific apps from tracking)
-- [x] Date navigation (browse any past day from the Today view)
-- [x] Keyboard navigation (Cmd+1/2/3 for views, arrow keys for dates, t for today)
-- [x] View transitions with preloading (fade animations, hover preload)
-- [x] Weekly summary view with prior week comparison
-- [x] App categories and productivity score (Productive, Neutral, Distracting)
-- [x] Project detection from window titles (editor workspace, browser tab, terminal session)
-- [x] CSV export per space with date range selection
-- [x] Code signing and notarization for Gatekeeper
-- [x] Homebrew cask distribution (`brew install stoffbergie/tap/record`)
+Record can read window titles and supported apps' local databases to identify projects and agent activity. External databases are opened read-only. CSV exports are saved to the location you choose.
 
 ## License
 
