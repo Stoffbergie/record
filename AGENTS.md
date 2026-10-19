@@ -26,7 +26,7 @@ Everything reusable goes in `packages/`. The types package defines the contract 
 | Linting/formatting (TS) | Biome | Single config at repo root. |
 | Linting/formatting (Rust) | cargo fmt + clippy | Standard rustfmt, clippy with `-D warnings`. |
 | Pre-commit hooks | Lefthook | Config in `lefthook.yml`. |
-| CI | GitHub Actions | macOS runners (required for Tauri build). |
+| Release automation | GitHub Actions | macOS release builds. Validation runs locally. |
 
 ## Development Commands
 
