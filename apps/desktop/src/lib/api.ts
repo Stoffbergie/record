@@ -2,6 +2,7 @@ import type {
   AgentSummary,
   AppSession,
   DailySummary,
+  DayRange,
   ProjectUsage,
   Space,
   SpaceUsage,
@@ -22,8 +23,17 @@ function localDateStr(date: Date): string {
   return `${y}-${m}-${d}`
 }
 
-function tzOffset(): number {
-  return -new Date().getTimezoneOffset()
+function localDayRange(date: Date): DayRange {
+  const start = new Date(date)
+  start.setHours(0, 0, 0, 0)
+  const end = new Date(start)
+  end.setDate(end.getDate() + 1)
+  end.setHours(0, 0, 0, 0)
+  return {
+    date: localDateStr(date),
+    start: start.toISOString(),
+    end: end.toISOString(),
+  }
 }
 
 export { localDateStr }
@@ -37,8 +47,7 @@ export async function getSessions(start: Date, end: Date): Promise<AppSession[]>
 
 export async function getDailySummary(date: Date): Promise<DailySummary> {
   return invoke<DailySummary>('get_daily_summary', {
-    date: localDateStr(date),
-    tzOffsetMinutes: tzOffset(),
+    day: localDayRange(date),
   })
 }
 
@@ -65,17 +74,23 @@ export async function setAutoStart(enabled: boolean): Promise<void> {
 
 export async function getAppSessions(date: Date, bundleId: string): Promise<AppSession[]> {
   return invoke<AppSession[]>('get_app_sessions', {
-    date: localDateStr(date),
+    day: localDayRange(date),
     bundleId,
-    tzOffsetMinutes: tzOffset(),
   })
 }
 
 export async function getAppAverages(date: Date, bundleId: string): Promise<[number, number]> {
+  const end = new Date(date)
+  end.setHours(0, 0, 0, 0)
+  const weekStart = new Date(end)
+  weekStart.setDate(weekStart.getDate() - 6)
+  const monthStart = new Date(end)
+  monthStart.setDate(monthStart.getDate() - 29)
   return invoke<[number, number]>('get_app_averages', {
-    date: localDateStr(date),
     bundleId,
-    tzOffsetMinutes: tzOffset(),
+    weekStart: localDayRange(weekStart).start,
+    monthStart: localDayRange(monthStart).start,
+    end: end.toISOString(),
   })
 }
 
@@ -97,16 +112,14 @@ export async function getExclusions(): Promise<[string, string, string | null][]
 
 export async function getAppProjects(date: Date, bundleId: string): Promise<ProjectUsage[]> {
   return invoke<ProjectUsage[]>('get_app_projects', {
-    date: localDateStr(date),
+    day: localDayRange(date),
     bundleId,
-    tzOffsetMinutes: tzOffset(),
   })
 }
 
 export async function getDailyProjects(date: Date): Promise<ProjectUsage[]> {
   return invoke<ProjectUsage[]>('get_daily_projects', {
-    date: localDateStr(date),
-    tzOffsetMinutes: tzOffset(),
+    day: localDayRange(date),
   })
 }
 
@@ -163,15 +176,13 @@ export async function getProjectExclusions(): Promise<[string, string | null][]>
 
 export async function getDailySpaces(date: Date): Promise<SpaceUsage[]> {
   return invoke<SpaceUsage[]>('get_daily_spaces', {
-    date: localDateStr(date),
-    tzOffsetMinutes: tzOffset(),
+    day: localDayRange(date),
   })
 }
 
 export async function getDailyAgentSummary(date: Date): Promise<AgentSummary> {
   return invoke<AgentSummary>('get_daily_agent_summary', {
-    date: localDateStr(date),
-    tzOffsetMinutes: tzOffset(),
+    day: localDayRange(date),
   })
 }
 
@@ -181,11 +192,20 @@ export async function exportSpaceCsv(
   endDate: string,
   filePath: string,
 ): Promise<void> {
+  const days: DayRange[] = []
+  const current = new Date(`${startDate}T00:00:00`)
+  const last = new Date(`${endDate}T00:00:00`)
+  if (Number.isNaN(current.getTime()) || Number.isNaN(last.getTime())) {
+    throw new Error('Invalid export date')
+  }
+  while (current <= last) {
+    days.push(localDayRange(current))
+    current.setDate(current.getDate() + 1)
+    current.setHours(0, 0, 0, 0)
+  }
   await invoke('export_space_csv', {
     spaceId,
-    startDate,
-    endDate,
-    tzOffsetMinutes: tzOffset(),
+    days,
     filePath,
   })
 }

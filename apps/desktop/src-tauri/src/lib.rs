@@ -49,13 +49,10 @@ fn get_sessions(
 #[tauri::command]
 fn get_daily_summary(
     state: tauri::State<AppState>,
-    date: String,
-    tz_offset_minutes: i32,
+    day: types::DayRange,
 ) -> Result<types::DailySummary, String> {
     let store = state.store.lock().map_err(|e| e.to_string())?;
-    store
-        .get_daily_summary(&date, tz_offset_minutes)
-        .map_err(|e| e.to_string())
+    store.get_daily_summary(&day).map_err(|e| e.to_string())
 }
 
 fn find_app_icon_path(bundle_id: &str) -> Option<PathBuf> {
@@ -134,26 +131,26 @@ fn get_app_icon(
 #[tauri::command]
 fn get_app_sessions(
     state: tauri::State<AppState>,
-    date: String,
+    day: types::DayRange,
     bundle_id: String,
-    tz_offset_minutes: i32,
 ) -> Result<Vec<types::AppSession>, String> {
     let store = state.store.lock().map_err(|e| e.to_string())?;
     store
-        .get_app_sessions(&date, &bundle_id, tz_offset_minutes)
+        .get_app_sessions(&day, &bundle_id)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn get_app_averages(
     state: tauri::State<AppState>,
-    date: String,
     bundle_id: String,
-    tz_offset_minutes: i32,
+    week_start: DateTime<Utc>,
+    month_start: DateTime<Utc>,
+    end: DateTime<Utc>,
 ) -> Result<(f64, f64), String> {
     let store = state.store.lock().map_err(|e| e.to_string())?;
     store
-        .get_app_averages(&bundle_id, &date, tz_offset_minutes)
+        .get_app_averages(&bundle_id, week_start, month_start, end)
         .map_err(|e| e.to_string())
 }
 
@@ -189,26 +186,22 @@ fn get_exclusions(
 #[tauri::command]
 fn get_app_projects(
     state: tauri::State<AppState>,
-    date: String,
+    day: types::DayRange,
     bundle_id: String,
-    tz_offset_minutes: i32,
 ) -> Result<Vec<types::ProjectUsage>, String> {
     let store = state.store.lock().map_err(|e| e.to_string())?;
     store
-        .get_app_projects(&date, &bundle_id, tz_offset_minutes)
+        .get_app_projects(&day, &bundle_id)
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn get_daily_projects(
     state: tauri::State<AppState>,
-    date: String,
-    tz_offset_minutes: i32,
+    day: types::DayRange,
 ) -> Result<Vec<types::ProjectUsage>, String> {
     let store = state.store.lock().map_err(|e| e.to_string())?;
-    store
-        .get_daily_projects(&date, tz_offset_minutes)
-        .map_err(|e| e.to_string())
+    store.get_daily_projects(&day).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -313,24 +306,20 @@ fn get_project_exclusions(
 #[tauri::command]
 fn get_daily_spaces(
     state: tauri::State<AppState>,
-    date: String,
-    tz_offset_minutes: i32,
+    day: types::DayRange,
 ) -> Result<Vec<types::SpaceUsage>, String> {
     let store = state.store.lock().map_err(|e| e.to_string())?;
-    store
-        .get_daily_spaces(&date, tz_offset_minutes)
-        .map_err(|e| e.to_string())
+    store.get_daily_spaces(&day).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn get_daily_agent_summary(
     state: tauri::State<AppState>,
-    date: String,
-    tz_offset_minutes: i32,
+    day: types::DayRange,
 ) -> Result<types::AgentSummary, String> {
     let store = state.store.lock().map_err(|e| e.to_string())?;
     store
-        .get_daily_agent_summary(&date, tz_offset_minutes)
+        .get_daily_agent_summary(&day)
         .map_err(|e| e.to_string())
 }
 
@@ -391,14 +380,12 @@ fn backfill_projects(state: tauri::State<AppState>) -> Result<u64, String> {
 fn export_space_csv(
     state: tauri::State<AppState>,
     space_id: i64,
-    start_date: String,
-    end_date: String,
-    tz_offset_minutes: i32,
+    days: Vec<types::DayRange>,
     file_path: String,
 ) -> Result<(), String> {
     let store = state.store.lock().map_err(|e| e.to_string())?;
     let csv = store
-        .export_space_csv(space_id, &start_date, &end_date, tz_offset_minutes)
+        .export_space_csv(space_id, &days)
         .map_err(|e| e.to_string())?;
     std::fs::write(&file_path, csv).map_err(|e| e.to_string())
 }

@@ -1,10 +1,10 @@
 use crate::agent::{merge_intervals, AgentWorkSlice};
 use crate::types::{
     AgentProjectUsage, AgentSession, AgentSummary, AgentUsage, AppSession, AppUsage, DailySummary,
-    Heartbeat, LiveActivity, ProjectDetail, ProjectUsage, Space, SpaceUsage, SpaceWithProjects,
-    TrackerConfig,
+    DayRange, Heartbeat, LiveActivity, ProjectDetail, ProjectUsage, Space, SpaceUsage,
+    SpaceWithProjects, TrackerConfig,
 };
-use chrono::{DateTime, Duration, NaiveDate, NaiveTime, Utc};
+use chrono::{DateTime, Duration, Utc};
 use rusqlite::{functions::FunctionFlags, Connection};
 use std::cmp::Reverse;
 
@@ -14,17 +14,6 @@ fn escape_csv(s: &str) -> String {
     } else {
         s.to_string()
     }
-}
-
-fn day_bounds_utc(date: &str, tz_offset_minutes: i32) -> (String, String) {
-    let d = NaiveDate::parse_from_str(date, "%Y-%m-%d").unwrap();
-    let local_midnight = d.and_time(NaiveTime::MIN);
-    let utc_start = local_midnight - Duration::minutes(tz_offset_minutes as i64);
-    let utc_end = utc_start + Duration::days(1);
-    (
-        utc_start.and_utc().to_rfc3339(),
-        utc_end.and_utc().to_rfc3339(),
-    )
 }
 
 pub struct SessionStore {
@@ -168,12 +157,9 @@ impl SessionStore {
         rows.collect()
     }
 
-    pub fn get_daily_summary(
-        &self,
-        date: &str,
-        tz_offset_minutes: i32,
-    ) -> rusqlite::Result<DailySummary> {
-        let (start, end) = day_bounds_utc(date, tz_offset_minutes);
+    pub fn get_daily_summary(&self, day: &DayRange) -> rusqlite::Result<DailySummary> {
+        let start = day.start.to_rfc3339();
+        let end = day.end.to_rfc3339();
 
         let now = Utc::now().to_rfc3339();
         self.conn.execute(
@@ -219,17 +205,15 @@ impl SessionStore {
         }
 
         let now = Utc::now();
-        let today = (now + Duration::minutes(tz_offset_minutes as i64))
-            .format("%Y-%m-%d")
-            .to_string();
         let live_activity = self.live_activity.as_ref().filter(|activity| {
-            date == today
+            day.start <= now
+                && now < day.end
                 && activity.expires_at > now
                 && apps.iter().any(|app| app.bundle_id == activity.bundle_id)
         });
 
         Ok(DailySummary {
-            date: date.to_string(),
+            date: day.date.clone(),
             total_active_secs: total_active,
             total_idle_secs: total_idle,
             apps,
@@ -240,21 +224,13 @@ impl SessionStore {
     pub fn get_app_averages(
         &self,
         bundle_id: &str,
-        today: &str,
-        tz_offset_minutes: i32,
+        week_start: DateTime<Utc>,
+        month_start: DateTime<Utc>,
+        end: DateTime<Utc>,
     ) -> rusqlite::Result<(f64, f64)> {
-        let today_date = NaiveDate::parse_from_str(today, "%Y-%m-%d").unwrap();
-        let week_start_date = (today_date - Duration::days(6))
-            .format("%Y-%m-%d")
-            .to_string();
-        let month_start_date = (today_date - Duration::days(29))
-            .format("%Y-%m-%d")
-            .to_string();
-
-        let (week_start, _) = day_bounds_utc(&week_start_date, tz_offset_minutes);
-        let (today_start, _) = day_bounds_utc(today, tz_offset_minutes);
-
-        let (month_start, _) = day_bounds_utc(&month_start_date, tz_offset_minutes);
+        let week_start = week_start.to_rfc3339();
+        let month_start = month_start.to_rfc3339();
+        let end = end.to_rfc3339();
 
         let week_avg: f64 = self.conn.query_row(
             "SELECT COALESCE(CAST(SUM(
@@ -264,7 +240,7 @@ impl SessionStore {
              FROM app_sessions
              WHERE bundle_id = ?1 AND is_idle = 0
              AND started_at < ?3 AND ended_at > ?2",
-            rusqlite::params![bundle_id, week_start, today_start],
+            rusqlite::params![bundle_id, week_start, end],
             |row| row.get(0),
         )?;
 
@@ -276,7 +252,7 @@ impl SessionStore {
              FROM app_sessions
              WHERE bundle_id = ?1 AND is_idle = 0
              AND started_at < ?3 AND ended_at > ?2",
-            rusqlite::params![bundle_id, month_start, today_start],
+            rusqlite::params![bundle_id, month_start, end],
             |row| row.get(0),
         )?;
 
@@ -285,17 +261,11 @@ impl SessionStore {
 
     pub fn get_app_sessions(
         &self,
-        date: &str,
+        day: &DayRange,
         bundle_id: &str,
-        tz_offset_minutes: i32,
     ) -> rusqlite::Result<Vec<AppSession>> {
-        let (start, end) = day_bounds_utc(date, tz_offset_minutes);
-        let range_start = DateTime::parse_from_rfc3339(&start)
-            .unwrap()
-            .with_timezone(&Utc);
-        let range_end = DateTime::parse_from_rfc3339(&end)
-            .unwrap()
-            .with_timezone(&Utc);
+        let start = day.start.to_rfc3339();
+        let end = day.end.to_rfc3339();
 
         let mut stmt = self.conn.prepare(
             "SELECT id, app_name, bundle_id, window_title, started_at, ended_at, duration_secs, is_idle, metadata, project, detail
@@ -305,7 +275,7 @@ impl SessionStore {
         )?;
         let rows = stmt.query_map(rusqlite::params![start, end, bundle_id], |row| {
             Self::row_to_session(row)
-                .map(|session| Self::clamp_session(session, range_start, range_end))
+                .map(|session| Self::clamp_session(session, day.start, day.end))
         })?;
         rows.collect()
     }
@@ -341,11 +311,11 @@ impl SessionStore {
 
     pub fn get_app_projects(
         &self,
-        date: &str,
+        day: &DayRange,
         bundle_id: &str,
-        tz_offset_minutes: i32,
     ) -> rusqlite::Result<Vec<ProjectUsage>> {
-        let (start, end) = day_bounds_utc(date, tz_offset_minutes);
+        let start = day.start.to_rfc3339();
+        let end = day.end.to_rfc3339();
         self.clean_expired_project_exclusions()?;
 
         let mut stmt = self.conn.prepare(
@@ -405,20 +375,13 @@ impl SessionStore {
         Ok(result)
     }
 
-    pub fn get_daily_projects(
-        &self,
-        date: &str,
-        tz_offset_minutes: i32,
-    ) -> rusqlite::Result<Vec<ProjectUsage>> {
-        let (start, end) = day_bounds_utc(date, tz_offset_minutes);
+    pub fn get_daily_projects(&self, day: &DayRange) -> rusqlite::Result<Vec<ProjectUsage>> {
+        let start = day.start.to_rfc3339();
+        let end = day.end.to_rfc3339();
         self.clean_expired_project_exclusions()?;
 
-        let day_start = DateTime::parse_from_rfc3339(&start)
-            .unwrap()
-            .with_timezone(&Utc);
-        let day_end = DateTime::parse_from_rfc3339(&end)
-            .unwrap()
-            .with_timezone(&Utc);
+        let day_start = day.start;
+        let day_end = day.end;
 
         let mut active_stmt = self.conn.prepare(
             "SELECT s.project, s.started_at, s.ended_at, s.duration_secs
@@ -712,12 +675,8 @@ impl SessionStore {
         Ok(())
     }
 
-    pub fn get_daily_spaces(
-        &self,
-        date: &str,
-        tz_offset_minutes: i32,
-    ) -> rusqlite::Result<Vec<SpaceUsage>> {
-        let projects = self.get_daily_projects(date, tz_offset_minutes)?;
+    pub fn get_daily_spaces(&self, day: &DayRange) -> rusqlite::Result<Vec<SpaceUsage>> {
+        let projects = self.get_daily_projects(day)?;
 
         let mut space_map: std::collections::HashMap<Option<i64>, Vec<ProjectUsage>> =
             std::collections::HashMap::new();
@@ -776,13 +735,7 @@ impl SessionStore {
         Ok(result)
     }
 
-    pub fn export_space_csv(
-        &self,
-        space_id: i64,
-        start_date: &str,
-        end_date: &str,
-        tz_offset_minutes: i32,
-    ) -> rusqlite::Result<String> {
+    pub fn export_space_csv(&self, space_id: i64, days: &[DayRange]) -> rusqlite::Result<String> {
         let mut stmt = self
             .conn
             .prepare("SELECT project FROM space_projects WHERE space_id = ?1")?;
@@ -790,18 +743,11 @@ impl SessionStore {
             .query_map(rusqlite::params![space_id], |row| row.get(0))?
             .collect::<rusqlite::Result<Vec<String>>>()?;
 
-        let start = NaiveDate::parse_from_str(start_date, "%Y-%m-%d")
-            .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
-        let end = NaiveDate::parse_from_str(end_date, "%Y-%m-%d")
-            .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
-
         let mut csv =
             String::from("date,project,active_secs,agent_secs,total_secs,session_count\n");
 
-        let mut current = start;
-        while current <= end {
-            let date_str = current.format("%Y-%m-%d").to_string();
-            let projects = self.get_daily_projects(&date_str, tz_offset_minutes)?;
+        for day in days {
+            let projects = self.get_daily_projects(day)?;
 
             let project_map: std::collections::HashMap<&str, &ProjectUsage> =
                 projects.iter().map(|p| (p.project.as_str(), p)).collect();
@@ -811,7 +757,7 @@ impl SessionStore {
                     Some(p) => {
                         csv.push_str(&format!(
                             "{},{},{},{},{},{}\n",
-                            date_str,
+                            day.date,
                             escape_csv(sp),
                             p.active_secs,
                             p.agent_secs,
@@ -820,12 +766,10 @@ impl SessionStore {
                         ));
                     }
                     None => {
-                        csv.push_str(&format!("{},{},0,0,0,0\n", date_str, escape_csv(sp)));
+                        csv.push_str(&format!("{},{},0,0,0,0\n", day.date, escape_csv(sp)));
                     }
                 }
             }
-
-            current += Duration::days(1);
         }
 
         Ok(csv)
@@ -991,12 +935,9 @@ impl SessionStore {
         transaction.commit()
     }
 
-    pub fn get_daily_agent_summary(
-        &self,
-        date: &str,
-        tz_offset_minutes: i32,
-    ) -> rusqlite::Result<AgentSummary> {
-        let (start, end) = day_bounds_utc(date, tz_offset_minutes);
+    pub fn get_daily_agent_summary(&self, day: &DayRange) -> rusqlite::Result<AgentSummary> {
+        let start = day.start.to_rfc3339();
+        let end = day.end.to_rfc3339();
         self.clean_expired_project_exclusions()?;
 
         let mut stmt = self.conn.prepare(
@@ -1028,12 +969,8 @@ impl SessionStore {
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
 
-        let day_start = DateTime::parse_from_rfc3339(&start)
-            .unwrap()
-            .with_timezone(&Utc);
-        let day_end = DateTime::parse_from_rfc3339(&end)
-            .unwrap()
-            .with_timezone(&Utc);
+        let day_start = day.start;
+        let day_end = day.end;
 
         let mut project_map: std::collections::HashMap<String, Vec<&AgentSession>> =
             std::collections::HashMap::new();
@@ -1099,7 +1036,7 @@ impl SessionStore {
         projects.sort_by_key(|project| Reverse(project.total_secs));
 
         Ok(AgentSummary {
-            date: date.to_string(),
+            date: day.date.clone(),
             total_agent_secs,
             projects,
         })
@@ -1211,6 +1148,17 @@ mod tests {
     fn test_store() -> SessionStore {
         let conn = Connection::open_in_memory().unwrap();
         SessionStore::new(conn, TrackerConfig::default()).unwrap()
+    }
+
+    fn utc_day(date: &str) -> DayRange {
+        let start = DateTime::parse_from_rfc3339(&format!("{date}T00:00:00Z"))
+            .unwrap()
+            .with_timezone(&Utc);
+        DayRange {
+            date: date.to_string(),
+            start,
+            end: start + Duration::days(1),
+        }
     }
 
     fn heartbeat(app: &str, bundle: &str) -> Heartbeat {
@@ -1402,7 +1350,7 @@ mod tests {
             .unwrap();
 
         let date = t1.format("%Y-%m-%d").to_string();
-        let summary = store.get_daily_summary(&date, 0).unwrap();
+        let summary = store.get_daily_summary(&utc_day(&date)).unwrap();
 
         assert_eq!(summary.date, date);
         assert_eq!(summary.total_active_secs, 20);
@@ -1477,7 +1425,7 @@ mod tests {
         assert_eq!(sessions[1].duration_secs, 10);
 
         let date = t1.format("%Y-%m-%d").to_string();
-        let summary = store.get_daily_summary(&date, 0).unwrap();
+        let summary = store.get_daily_summary(&utc_day(&date)).unwrap();
         assert_eq!(summary.total_active_secs, 5);
         assert_eq!(summary.total_idle_secs, 10);
     }
@@ -1540,7 +1488,7 @@ mod tests {
             .unwrap();
 
         let date = t1.format("%Y-%m-%d").to_string();
-        let summary = store.get_daily_summary(&date, 0).unwrap();
+        let summary = store.get_daily_summary(&utc_day(&date)).unwrap();
 
         assert_eq!(summary.apps.len(), 1, "Safari should be excluded");
         assert_eq!(summary.apps[0].app_name, "Code");
@@ -1602,12 +1550,12 @@ mod tests {
         }
 
         let date = t1.format("%Y-%m-%d").to_string();
-        let projects = store.get_daily_projects(&date, 0).unwrap();
+        let projects = store.get_daily_projects(&utc_day(&date)).unwrap();
         assert_eq!(projects.len(), 2);
 
         store.add_project_exclusion("noisy", None).unwrap();
 
-        let projects = store.get_daily_projects(&date, 0).unwrap();
+        let projects = store.get_daily_projects(&utc_day(&date)).unwrap();
         assert_eq!(projects.len(), 1, "excluded project should be hidden");
         assert_eq!(projects[0].project, "record");
 
@@ -1616,7 +1564,7 @@ mod tests {
         assert_eq!(all[0].0, "record");
 
         store.remove_project_exclusion("noisy").unwrap();
-        let projects = store.get_daily_projects(&date, 0).unwrap();
+        let projects = store.get_daily_projects(&utc_day(&date)).unwrap();
         assert_eq!(
             projects.len(),
             2,
@@ -1671,7 +1619,7 @@ mod tests {
         store.upsert_agent_sessions(&slices).unwrap();
 
         let date = t1.format("%Y-%m-%d").to_string();
-        let summary = store.get_daily_agent_summary(&date, 0).unwrap();
+        let summary = store.get_daily_agent_summary(&utc_day(&date)).unwrap();
         assert_eq!(summary.projects.len(), 1);
         assert_eq!(summary.projects[0].project, "record");
         assert_eq!(summary.projects[0].total_secs, 120);
@@ -1687,7 +1635,7 @@ mod tests {
         }];
         store.upsert_agent_sessions(&new_slices).unwrap();
 
-        let summary = store.get_daily_agent_summary(&date, 0).unwrap();
+        let summary = store.get_daily_agent_summary(&utc_day(&date)).unwrap();
         assert_eq!(
             summary.projects[0].session_count, 1,
             "old rows should be replaced"
@@ -1723,7 +1671,7 @@ mod tests {
         store.upsert_agent_sessions(&slices).unwrap();
 
         let date = t1.format("%Y-%m-%d").to_string();
-        let summary = store.get_daily_agent_summary(&date, 0).unwrap();
+        let summary = store.get_daily_agent_summary(&utc_day(&date)).unwrap();
         assert_eq!(summary.projects.len(), 1);
         assert_eq!(
             summary.projects[0].total_secs, 150,
@@ -1761,7 +1709,7 @@ mod tests {
         store.upsert_agent_sessions(&slices).unwrap();
 
         let date = t1.format("%Y-%m-%d").to_string();
-        let summary = store.get_daily_agent_summary(&date, 0).unwrap();
+        let summary = store.get_daily_agent_summary(&utc_day(&date)).unwrap();
         assert_eq!(summary.projects.len(), 2);
         assert_eq!(
             summary.total_agent_secs, 300,
