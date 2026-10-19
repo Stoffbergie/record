@@ -147,7 +147,7 @@ function AppIcon(props: { bundleId: string }) {
   )
 }
 
-export default function WeeklyView() {
+export default function WeeklyView(props: { active: boolean }) {
   const [monday, setMonday] = createSignal(getMonday(new Date()))
   const [week, setWeek] = createSignal<WeekData | null>(null)
   const [prevWeek, setPrevWeek] = createSignal<WeekData | null>(null)
@@ -180,6 +180,7 @@ export default function WeeklyView() {
   onMount(() => {
     load()
     const keyHandler = (e: KeyboardEvent) => {
+      if (!props.active) return
       const tag = (e.target as HTMLElement)?.tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
       if (e.metaKey || e.ctrlKey || e.altKey) return

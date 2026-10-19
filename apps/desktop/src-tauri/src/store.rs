@@ -105,13 +105,13 @@ impl SessionStore {
     }
 
     fn try_merge(&self, heartbeat: &Heartbeat) -> rusqlite::Result<Option<Option<DateTime<Utc>>>> {
-        let result: rusqlite::Result<(i64, String, String, String, bool)> = self.conn.query_row(
-            "SELECT id, bundle_id, started_at, ended_at, is_idle FROM app_sessions ORDER BY id DESC LIMIT 1",
+        let result: rusqlite::Result<(i64, String, String, String, bool, Option<String>)> = self.conn.query_row(
+            "SELECT id, bundle_id, started_at, ended_at, is_idle, project FROM app_sessions ORDER BY id DESC LIMIT 1",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
         );
 
-        let (id, bundle_id, started_at_str, ended_at_str, is_idle) = match result {
+        let (id, bundle_id, started_at_str, ended_at_str, is_idle, project) = match result {
             Ok(row) => row,
             Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(Some(None)),
             Err(e) => return Err(e),
@@ -121,7 +121,10 @@ impl SessionStore {
             .unwrap()
             .with_timezone(&Utc);
 
-        if bundle_id != heartbeat.bundle_id || is_idle != heartbeat.is_idle {
+        if bundle_id != heartbeat.bundle_id
+            || is_idle != heartbeat.is_idle
+            || project != heartbeat.project
+        {
             return Ok(Some(Some(ended_at)));
         }
 
@@ -453,9 +456,11 @@ impl SessionStore {
             .collect();
 
         let mut agent_stmt = self.conn.prepare(
-            "SELECT project, started_at, ended_at
-             FROM agent_sessions
-             WHERE started_at < ?2 AND ended_at > ?1",
+            "SELECT s.project, s.started_at, s.ended_at
+             FROM agent_sessions s
+             LEFT JOIN project_exclusions pe ON s.project = pe.project
+             WHERE s.started_at < ?2 AND s.ended_at > ?1
+             AND pe.project IS NULL",
         )?;
 
         struct AgentRow {
@@ -918,17 +923,18 @@ impl SessionStore {
     }
 
     pub fn upsert_agent_sessions(&self, slices: &[AgentWorkSlice]) -> rusqlite::Result<()> {
+        let transaction = self.conn.unchecked_transaction()?;
         let mut seen_refs: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for slice in slices {
             if seen_refs.insert(&slice.session_ref) {
-                self.conn.execute(
+                transaction.execute(
                     "DELETE FROM agent_sessions WHERE session_ref = ?1",
                     rusqlite::params![slice.session_ref],
                 )?;
             }
         }
 
-        let mut stmt = self.conn.prepare(
+        let mut stmt = transaction.prepare(
             "INSERT INTO agent_sessions (agent, project, session_ref, started_at, ended_at, duration_secs)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )?;
@@ -943,7 +949,8 @@ impl SessionStore {
                 slice.duration_secs,
             ])?;
         }
-        Ok(())
+        drop(stmt);
+        transaction.commit()
     }
 
     pub fn get_daily_agent_summary(
@@ -952,12 +959,15 @@ impl SessionStore {
         tz_offset_minutes: i32,
     ) -> rusqlite::Result<AgentSummary> {
         let (start, end) = day_bounds_utc(date, tz_offset_minutes);
+        self.clean_expired_project_exclusions()?;
 
         let mut stmt = self.conn.prepare(
-            "SELECT id, agent, project, session_ref, started_at, ended_at, duration_secs
-             FROM agent_sessions
-             WHERE started_at < ?2 AND ended_at > ?1
-             ORDER BY project, agent, started_at",
+            "SELECT s.id, s.agent, s.project, s.session_ref, s.started_at, s.ended_at, s.duration_secs
+             FROM agent_sessions s
+             LEFT JOIN project_exclusions pe ON s.project = pe.project
+             WHERE s.started_at < ?2 AND s.ended_at > ?1
+             AND pe.project IS NULL
+             ORDER BY s.project, s.agent, s.started_at",
         )?;
 
         let sessions: Vec<AgentSession> = stmt

@@ -1,5 +1,5 @@
 import type { AgentProjectUsage, AppUsage, LiveActivity, SpaceUsage } from '@record/types'
-import { createMemo, createSignal, For, onCleanup, onMount, Show } from 'solid-js'
+import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from 'solid-js'
 import { createStore, reconcile } from 'solid-js/store'
 import {
   addProjectExclusion,
@@ -85,7 +85,7 @@ interface StoreState {
   ready: boolean
 }
 
-export default function TodayView() {
+export default function TodayView(props: { active: boolean }) {
   const [state, setState] = createStore<StoreState>({
     activeSecs: 0,
     idleSecs: 0,
@@ -103,16 +103,22 @@ export default function TodayView() {
   const [expandedProject, setExpandedProject] = createSignal<string | null>(null)
   const [ignoringProject, setIgnoringProject] = createSignal<string | null>(null)
   let lastFetchTime = 0
+  let refreshVersion = 0
+  let appliedRefreshVersion = 0
 
   const isToday = () => sameDay(selectedDate(), new Date())
 
   async function refresh() {
+    const date = selectedDate()
+    const version = ++refreshVersion
     try {
       const [data, spaces, agentData] = await Promise.all([
-        getDailySummary(selectedDate()),
-        getDailySpaces(selectedDate()),
-        getDailyAgentSummary(selectedDate()),
+        getDailySummary(date),
+        getDailySpaces(date),
+        getDailyAgentSummary(date),
       ])
+      if (date !== selectedDate() || version < appliedRefreshVersion) return
+      appliedRefreshVersion = version
       lastFetchTime = Date.now()
       setState({
         activeSecs: data.total_active_secs,
@@ -153,18 +159,34 @@ export default function TodayView() {
     refresh()
   }
 
+  createEffect(
+    on(
+      () => props.active,
+      (active, previousActive) => {
+        if (!active) return
+        if (previousActive === false) refresh()
+
+        const fetchId = setInterval(() => {
+          if (isToday()) refresh()
+        }, 5000)
+        const tickId = setInterval(() => {
+          if (isToday() && lastFetchTime > 0) {
+            setElapsed(Math.floor((Date.now() - lastFetchTime) / 1000))
+          }
+        }, 1000)
+
+        onCleanup(() => {
+          clearInterval(fetchId)
+          clearInterval(tickId)
+        })
+      },
+    ),
+  )
+
   onMount(() => {
     refresh()
-    const fetchId = setInterval(() => {
-      if (isToday()) refresh()
-    }, 5000)
-    const tickId = setInterval(() => {
-      if (isToday() && lastFetchTime > 0) {
-        setElapsed(Math.floor((Date.now() - lastFetchTime) / 1000))
-      }
-    }, 1000)
-
     const keyHandler = (e: KeyboardEvent) => {
+      if (!props.active) return
       const tag = (e.target as HTMLElement)?.tagName
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
       if (e.metaKey || e.ctrlKey || e.altKey) return
@@ -183,8 +205,6 @@ export default function TodayView() {
     window.addEventListener('keydown', keyHandler)
 
     onCleanup(() => {
-      clearInterval(fetchId)
-      clearInterval(tickId)
       window.removeEventListener('keydown', keyHandler)
     })
   })
