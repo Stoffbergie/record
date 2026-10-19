@@ -74,9 +74,7 @@ export default function SettingsView() {
         <div class="setting-row">
           <div class="setting-info">
             <span class="setting-label">Record</span>
-            <span class="setting-desc">
-              Privacy-first activity tracker. All data stays on your machine.
-            </span>
+            <span class="setting-desc">Track your apps and projects locally on macOS.</span>
           </div>
           <Show when={version()}>
             <span class="setting-value mono">v{version()}</span>
