@@ -1,5 +1,5 @@
 import type { AgentProjectUsage, AppUsage, SpaceUsage } from '@record/types'
-import { createMemo, createSignal, For, onCleanup, onMount, Show } from 'solid-js'
+import { createEffect, createMemo, createSignal, For, on, onCleanup, onMount, Show } from 'solid-js'
 import { createStore, reconcile } from 'solid-js/store'
 import {
   addProjectExclusion,
@@ -156,17 +156,32 @@ export default function TodayView(props: { active: boolean }) {
     refresh()
   }
 
+  createEffect(
+    on(
+      () => props.active,
+      (active, previousActive) => {
+        if (!active) return
+        if (previousActive === false) refresh()
+
+        const fetchId = setInterval(() => {
+          if (isToday()) refresh()
+        }, 5000)
+        const tickId = setInterval(() => {
+          if (isToday() && lastFetchTime > 0) {
+            setElapsed(Math.floor((Date.now() - lastFetchTime) / 1000))
+          }
+        }, 1000)
+
+        onCleanup(() => {
+          clearInterval(fetchId)
+          clearInterval(tickId)
+        })
+      },
+    ),
+  )
+
   onMount(() => {
     refresh()
-    const fetchId = setInterval(() => {
-      if (isToday()) refresh()
-    }, 5000)
-    const tickId = setInterval(() => {
-      if (isToday() && lastFetchTime > 0) {
-        setElapsed(Math.floor((Date.now() - lastFetchTime) / 1000))
-      }
-    }, 1000)
-
     const keyHandler = (e: KeyboardEvent) => {
       if (!props.active) return
       const tag = (e.target as HTMLElement)?.tagName
@@ -187,8 +202,6 @@ export default function TodayView(props: { active: boolean }) {
     window.addEventListener('keydown', keyHandler)
 
     onCleanup(() => {
-      clearInterval(fetchId)
-      clearInterval(tickId)
       window.removeEventListener('keydown', keyHandler)
     })
   })
