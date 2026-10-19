@@ -24,11 +24,19 @@ function formatTimeShort(date: Date): string {
   })
 }
 
-function formatHour(h: number): string {
-  if (h === 0) return '12a'
-  if (h < 12) return `${h}a`
-  if (h === 12) return '12p'
-  return `${h - 12}p`
+function formatHour(timestamp: number): string {
+  const date = new Date(timestamp)
+  const hour = date.getHours()
+  let label = String(hour % 12 || 12)
+  if (date.getMinutes() > 0) label += `:${String(date.getMinutes()).padStart(2, '0')}`
+  return `${label}${hour < 12 ? 'a' : 'p'}`
+}
+
+function startOfHour(timestamp: number): number {
+  const date = new Date(timestamp)
+  const minutes = date.getMinutes() * 60_000
+  const seconds = date.getSeconds() * 1_000
+  return timestamp - minutes - seconds - date.getMilliseconds()
 }
 
 function AppIcon(props: { bundleId: string; size?: number }) {
@@ -56,12 +64,17 @@ function AppIcon(props: { bundleId: string; size?: number }) {
   )
 }
 
-function Timeline(props: { sessions: AppSession[] }) {
+function Timeline(props: { sessions: AppSession[]; date: Date }) {
   const [hovered, setHovered] = createSignal<number | null>(null)
 
   const range = createMemo(() => {
+    const dayStart = new Date(props.date)
+    dayStart.setHours(0, 0, 0, 0)
+    const dayEnd = new Date(dayStart)
+    dayEnd.setDate(dayEnd.getDate() + 1)
+    dayEnd.setHours(0, 0, 0, 0)
     const sessions = props.sessions
-    if (sessions.length === 0) return { startHour: 8, endHour: 20 }
+    if (sessions.length === 0) return { start: dayStart.getTime(), end: dayEnd.getTime() }
 
     let earliest = Infinity
     let latest = -Infinity
@@ -72,25 +85,26 @@ function Timeline(props: { sessions: AppSession[] }) {
       if (et > latest) latest = et
     }
     const now = Date.now()
-    if (now > latest) latest = now
+    if (now >= dayStart.getTime() && now < dayEnd.getTime()) latest = Math.max(latest, now)
 
-    const startHour = Math.max(0, new Date(earliest).getHours() - 1)
-    const endHour = Math.min(24, new Date(latest).getHours() + 2)
+    const start = startOfHour(earliest) - 3_600_000
+    const end = startOfHour(latest) + 7_200_000
 
-    return { startHour, endHour }
+    return {
+      start: Math.max(dayStart.getTime(), start),
+      end: Math.min(dayEnd.getTime(), end),
+    }
   })
 
   const blocks = createMemo(() => {
-    const { startHour, endHour } = range()
-    const totalMinutes = (endHour - startHour) * 60
+    const { start: rangeStart, end: rangeEnd } = range()
+    const duration = rangeEnd - rangeStart
 
     return props.sessions.map((s, i) => {
       const start = new Date(s.started_at)
       const end = new Date(s.ended_at)
-      const startMin = (start.getHours() - startHour) * 60 + start.getMinutes()
-      const endMin = (end.getHours() - startHour) * 60 + end.getMinutes()
-      const left = Math.max(0, (startMin / totalMinutes) * 100)
-      const width = Math.max(0.5, ((endMin - startMin) / totalMinutes) * 100)
+      const left = Math.max(0, ((start.getTime() - rangeStart) / duration) * 100)
+      const width = Math.max(0.5, ((end.getTime() - start.getTime()) / duration) * 100)
       return {
         left,
         width,
@@ -104,14 +118,17 @@ function Timeline(props: { sessions: AppSession[] }) {
   })
 
   const hourMarks = createMemo(() => {
-    const { startHour, endHour } = range()
-    const totalHours = endHour - startHour
+    const { start, end } = range()
+    const duration = end - start
+    const totalHours = duration / 3_600_000
     const marks: { label: string; left: number }[] = []
-    const step = totalHours > 12 ? 3 : totalHours > 6 ? 2 : 1
-    for (let h = startHour; h <= endHour; h += step) {
+    let step = 3_600_000
+    if (totalHours > 12) step *= 3
+    else if (totalHours > 6) step *= 2
+    for (let timestamp = start; timestamp <= end; timestamp += step) {
       marks.push({
-        label: formatHour(h),
-        left: ((h - startHour) / totalHours) * 100,
+        label: formatHour(timestamp),
+        left: ((timestamp - start) / duration) * 100,
       })
     }
     return marks
@@ -310,7 +327,7 @@ export default function AppDetailView(props: Props) {
         when={sessions() && sessions()!.length > 0}
         fallback={<div class="today-empty">No sessions recorded today.</div>}
       >
-        <Timeline sessions={sessions()!} />
+        <Timeline sessions={sessions()!} date={props.date} />
 
         <Show when={stats()}>
           {(s) => (
